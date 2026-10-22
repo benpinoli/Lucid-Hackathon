@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "provider": "local_deterministic_text",
+  "allow_runtime_code": false,
+  "allow_external_assets": false,
+  "allow_automatic_assessments": false,
+  "graph_methodology": "delegate_to_memory_graph_database_configuration",
+  "max_scene_event_bytes": 16384,
+  "max_scene_objects": 30,
+  "max_active_lessons": 128,
+  "max_websocket_messages_per_second": 20,
+  "voice": "not_connected_text_fallback"
+}

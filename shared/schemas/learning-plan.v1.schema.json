@@ -1,0 +1,84 @@
+{
+  "$defs": {
+    "TeachingBeat": {
+      "additionalProperties": false,
+      "properties": {
+        "beat_id": {
+          "title": "Beat Id",
+          "type": "string"
+        },
+        "say_text": {
+          "title": "Say Text",
+          "type": "string"
+        },
+        "focus_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Focus Ids",
+          "type": "array"
+        },
+        "cue": {
+          "default": "immediate",
+          "title": "Cue",
+          "type": "string"
+        },
+        "allow_interrupt": {
+          "default": true,
+          "title": "Allow Interrupt",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "beat_id",
+        "say_text",
+        "focus_ids"
+      ],
+      "title": "TeachingBeat",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "recipe_id": {
+      "title": "Recipe Id",
+      "type": "string"
+    },
+    "beats": {
+      "items": {
+        "$ref": "#/$defs/TeachingBeat"
+      },
+      "title": "Beats",
+      "type": "array"
+    },
+    "comprehension_prompt": {
+      "default": "How well do you understand this concept, from 1 to 10?",
+      "title": "Comprehension Prompt",
+      "type": "string"
+    },
+    "graph_context": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Graph Context"
+    }
+  },
+  "required": [
+    "recipe_id",
+    "beats"
+  ],
+  "title": "LessonPlan",
+  "type": "object"
+}

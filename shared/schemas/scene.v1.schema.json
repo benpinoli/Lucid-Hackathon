@@ -1,0 +1,422 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "Arrow": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "vector_arrow",
+          "default": "vector_arrow",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "start": {
+          "items": {
+            "maximum": 1000,
+            "minimum": -1000,
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Start",
+          "type": "array"
+        },
+        "end": {
+          "items": {
+            "maximum": 1000,
+            "minimum": -1000,
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "End",
+          "type": "array"
+        }
+      },
+      "required": [
+        "end"
+      ],
+      "title": "Arrow",
+      "type": "object"
+    },
+    "Axes": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "axes2d",
+          "default": "axes2d",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "extent": {
+          "default": 5.0,
+          "exclusiveMinimum": 0,
+          "maximum": 100,
+          "title": "Extent",
+          "type": "number"
+        }
+      },
+      "title": "Axes",
+      "type": "object"
+    },
+    "Create": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "node.create",
+          "default": "node.create",
+          "title": "Op",
+          "type": "string"
+        },
+        "node": {
+          "$ref": "#/$defs/Node"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "title": "Create",
+      "type": "object"
+    },
+    "Curve": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "line_curve",
+          "default": "line_curve",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "points": {
+          "items": {
+            "items": {
+              "maximum": 1000,
+              "minimum": -1000,
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "maxItems": 128,
+          "minItems": 2,
+          "title": "Points",
+          "type": "array"
+        }
+      },
+      "required": [
+        "points"
+      ],
+      "title": "Curve",
+      "type": "object"
+    },
+    "Label": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "text_label",
+          "default": "text_label",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 256,
+          "minLength": 1,
+          "pattern": "^[^<>\\x00-\\x1f]*$",
+          "title": "Text",
+          "type": "string"
+        },
+        "position": {
+          "items": {
+            "maximum": 1000,
+            "minimum": -1000,
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Position",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "Label",
+      "type": "object"
+    },
+    "Node": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "content": {
+          "discriminator": {
+            "mapping": {
+              "axes2d": "#/$defs/Axes",
+              "line_curve": "#/$defs/Curve",
+              "slider": "#/$defs/Slider",
+              "text_label": "#/$defs/Label",
+              "vector_arrow": "#/$defs/Arrow"
+            },
+            "propertyName": "primitive"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Axes"
+            },
+            {
+              "$ref": "#/$defs/Arrow"
+            },
+            {
+              "$ref": "#/$defs/Curve"
+            },
+            {
+              "$ref": "#/$defs/Label"
+            },
+            {
+              "$ref": "#/$defs/Slider"
+            }
+          ],
+          "title": "Content"
+        },
+        "style": {
+          "default": "primary",
+          "enum": [
+            "primary",
+            "secondary",
+            "muted"
+          ],
+          "title": "Style",
+          "type": "string"
+        },
+        "visible": {
+          "default": true,
+          "title": "Visible",
+          "type": "boolean"
+        },
+        "coordinate_system": {
+          "const": "lesson_xy",
+          "default": "lesson_xy",
+          "title": "Coordinate System",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "content"
+      ],
+      "title": "Node",
+      "type": "object"
+    },
+    "Patch": {
+      "additionalProperties": false,
+      "description": "Atomic typed node replacement; ID and primitive type remain immutable.",
+      "properties": {
+        "op": {
+          "const": "node.patch",
+          "default": "node.patch",
+          "title": "Op",
+          "type": "string"
+        },
+        "node": {
+          "$ref": "#/$defs/Node"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "title": "Patch",
+      "type": "object"
+    },
+    "Remove": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "node.remove",
+          "default": "node.remove",
+          "title": "Op",
+          "type": "string"
+        },
+        "object_id": {
+          "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+          "title": "Object Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id"
+      ],
+      "title": "Remove",
+      "type": "object"
+    },
+    "Replace": {
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "scene.replace",
+          "default": "scene.replace",
+          "title": "Op",
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/Node"
+          },
+          "maxItems": 30,
+          "title": "Nodes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes"
+      ],
+      "title": "Replace",
+      "type": "object"
+    },
+    "Slider": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "slider",
+          "default": "slider",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "binding": {
+          "enum": [
+            "projection.angle",
+            "projection.length"
+          ],
+          "title": "Binding",
+          "type": "string"
+        },
+        "minimum": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "Minimum",
+          "type": "number"
+        },
+        "maximum": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "Maximum",
+          "type": "number"
+        },
+        "value": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "Value",
+          "type": "number"
+        }
+      },
+      "required": [
+        "binding",
+        "minimum",
+        "maximum",
+        "value"
+      ],
+      "title": "Slider",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "event_id": {
+      "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "lesson_id": {
+      "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+      "title": "Lesson Id",
+      "type": "string"
+    },
+    "scene_id": {
+      "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+      "title": "Scene Id",
+      "type": "string"
+    },
+    "turn_id": {
+      "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+      "title": "Turn Id",
+      "type": "string"
+    },
+    "utterance_id": {
+      "pattern": "^[a-zA-Z0-9_-]{1,80}$",
+      "title": "Utterance Id",
+      "type": "string"
+    },
+    "turn_epoch": {
+      "minimum": 1,
+      "title": "Turn Epoch",
+      "type": "integer"
+    },
+    "seq": {
+      "minimum": 1,
+      "title": "Seq",
+      "type": "integer"
+    },
+    "base_revision": {
+      "minimum": 0,
+      "title": "Base Revision",
+      "type": "integer"
+    },
+    "operation": {
+      "discriminator": {
+        "mapping": {
+          "node.create": "#/$defs/Create",
+          "node.patch": "#/$defs/Patch",
+          "node.remove": "#/$defs/Remove",
+          "scene.replace": "#/$defs/Replace"
+        },
+        "propertyName": "op"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Replace"
+        },
+        {
+          "$ref": "#/$defs/Create"
+        },
+        {
+          "$ref": "#/$defs/Patch"
+        },
+        {
+          "$ref": "#/$defs/Remove"
+        }
+      ],
+      "title": "Operation"
+    },
+    "cue": {
+      "default": "immediate",
+      "enum": [
+        "immediate",
+        "manual"
+      ],
+      "title": "Cue",
+      "type": "string"
+    }
+  },
+  "required": [
+    "event_id",
+    "lesson_id",
+    "scene_id",
+    "turn_id",
+    "utterance_id",
+    "turn_epoch",
+    "seq",
+    "base_revision",
+    "operation"
+  ],
+  "title": "Event",
+  "type": "object"
+}
