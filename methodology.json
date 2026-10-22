@@ -1,0 +1,10 @@
+{
+  "formula_id": "baseline_v1",
+  "version": 1,
+  "epsilon": 1e-9,
+  "tie_breaking": "sorted_ids_first_discovery_strict_improvement",
+  "score_min": 1.0,
+  "score_max": 10.0,
+  "expression": "1 / (similarity * (understanding_a + understanding_b) + epsilon)",
+  "changes": []
+}
