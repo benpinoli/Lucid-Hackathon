@@ -1,0 +1,38 @@
+{
+  "version": "1.0",
+  "status": "proposed_unverified_targets",
+  "reference_device": "Meta Quest 3; exact model, browser, mode and network to be recorded before sign-off",
+  "headset_frame_targets": {
+    "baseline_hz": 72,
+    "baseline_frame_deadline_ms": 13.8889,
+    "stretch_hz": 90,
+    "stretch_frame_deadline_ms": 11.1111,
+    "measurement": "physical headset; warmed device; sustained >=10 minutes; report p50/p95/p99 and dropped frames"
+  },
+  "p95_limits_ms": {
+    "client_frame_patch_work": 2,
+    "local_interaction_to_visible": 50,
+    "cached_command_received_to_visible": 100,
+    "graph_shortest_path_10k_50k": 30,
+    "indexed_graph_query_local": 100,
+    "voice_first_audio": 2500
+  },
+  "p50_limits_ms": {
+    "voice_first_audio": 1200,
+    "cached_relevant_visual_after_turn": 300,
+    "common_recipe_plan": 2000
+  },
+  "scene_limits": {
+    "normal_patch_bytes_target": 4096,
+    "hard_patch_bytes": 16384,
+    "scene_max_objects_initial": 30,
+    "draw_calls_guideline_initial": 100,
+    "epsilon": 0.000001,
+    "dijkstra_formula_id": "human_dijkstra_v1"
+  },
+  "caveats": [
+    "All latency objectives are initial engineering targets; they are not measured guarantees.",
+    "No model inference, disk IO or HTTP work may block XR frame loop.",
+    "Client evidence of audio playout is needed for trustworthy sync metrics."
+  ]
+}
