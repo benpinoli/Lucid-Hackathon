@@ -1,5 +1,8 @@
 # Memory Graph
 
+For the connected LUCID application, see the [desktop/WebXR frontend setup](frontend/README.md)
+and [scene backend](backend/README.md). The graph engine below remains independently usable.
+
 A typed Python engine for a shared concept graph (**God Brain**) and separate personal knowledge graphs (**Human Brains**). SQLite stores concepts, relationships, assessments, and audit history. The engine has no frontend dependency.
 
 ## Setup

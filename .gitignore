@@ -13,3 +13,12 @@ dist/
 benchmark-results*.json
 .wheel-smoke/
 build-output.log
+node_modules/
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+frontend/test-results/
+frontend/playwright-report/
+*.pem
+.npm-cache/
+.playwright/

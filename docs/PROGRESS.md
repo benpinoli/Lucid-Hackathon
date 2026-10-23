@@ -1,5 +1,10 @@
 # LUCID VR backend progress
 
+Frontend follow-up, 2026-10-22: a connected desktop/WebXR starter is now implemented.
+See [frontend verification](FRONTEND.md) and [setup/runbook](../frontend/README.md).
+The backend-only findings below remain historical; their frontend gaps are superseded
+where listed in the follow-up. Physical headset acceptance is still pending.
+
 Date: 2026-10-22. Backend-only implementation requested alongside a concurrent memory agent.
 Commit: uncommitted. Repository started with no commits and untracked memory work; no branch
 switch, staging or commit was performed to avoid capturing or disturbing that work.

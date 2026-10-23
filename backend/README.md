@@ -1,11 +1,24 @@
 # LUCID scene and tutor backend
 
+## Desktop / WebXR companion
+
+The connected frontend is in [`frontend/`](../frontend/README.md). For local demo
+development, `$env:PYTHONPATH='src;.'` followed by
+`backend/.venv/Scripts/python.exe -m backend.tools.dev` seeds the demo, configures
+this process, prints the private browser token, and starts one backend worker.
+In another terminal run `cd frontend`, `npm ci`, `npm run dev`, then open
+`http://localhost:5173`. Full desktop/headset setup, TLS, testing, architecture,
+and troubleshooting are documented in the frontend README.
+
+## Backend setup and protocol
+
 Run commands from the repository root in PowerShell. Requires Python 3.12+.
 The memory package remains owned by the memory agent; this service imports its public API
 using `PYTHONPATH=src;.`. It does not maintain a second graph implementation or migration tree.
 
 ```powershell
 python -m venv backend/.venv
+backend/.venv/Scripts/python.exe -m pip install -e .
 backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.lock
 $env:PYTHONPATH='src;.'
 backend/.venv/Scripts/python.exe -m backend.tools.demo
