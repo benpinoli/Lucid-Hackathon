@@ -9,6 +9,7 @@ from a quiz answer, a lesson self-rating, or the documented derived-familiarity 
 from __future__ import annotations
 
 import re
+import heapq
 from collections import deque
 from dataclasses import dataclass
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -234,8 +235,8 @@ class Goals:
 
     def route(self, user, target):
         snapshot = self.graph.human(user).snapshot()
-        topic = self.curriculum.topic(target)
-        base = {"target": {"id": target, "name": topic.name}, "revision": snapshot.revision.human,
+        name = self.graph.god.get_concept(target).canonical_name
+        base = {"target": {"id": target, "name": name}, "revision": snapshot.revision.human,
                 "formula_id": snapshot.methodology.formula_id}
         if target not in snapshot.nodes:
             return {**base, "status": "needs_diagnostic", "steps": [], "next": None, "total_cost": None}
@@ -251,7 +252,7 @@ class Goals:
             starts = [[c for c in snapshot.nodes if c != target and known(c)],
                       # A learner who knows nothing nearby starts from the cluster's foundations.
                       [c for c in region if c != target and c in snapshot.nodes
-                       and self.curriculum.by_id[c].level == 0]]
+                       and c in self.curriculum.by_id and self.curriculum.by_id[c].level == 0]]
             for sources in starts:
                 if sources:
                     result = shortest_path(snapshot, sources, target)
@@ -268,6 +269,61 @@ class Goals:
         upcoming = [s["id"] for s in steps if not s["known"]]
         return {**base, "status": status, "steps": steps, "next": upcoming[0] if upcoming else None,
                 "total_cost": cost}
+
+    def teaching_context(self, user, target, limit=12):
+        """Distance-ranked context and a bridge to the goal, without inventing assessments.
+
+        Search the shared topology with the active traversal formula. Missing personal
+        evidence uses a conservative planning value of 1; this is never persisted.
+        Unlike a Human Brain route this can bridge concepts not yet assessed.
+        """
+        snapshot = self.graph.snapshot(human_id=user, scope="comparison")
+        snapshot.neighbors(target)
+        distance, toward, queue, settled = {target: 0.0}, {}, [(0.0, target)], []
+        anchor = None
+        while queue:
+            cost, concept = heapq.heappop(queue)
+            if cost != distance[concept]:
+                continue
+            settled.append(concept)
+            node = snapshot.nodes[concept]
+            if anchor is None and concept != target and (node.understanding or 0) >= KNOWN:
+                anchor = concept
+            # Keep the closest context and find the nearest known anchor in this component.
+            if len(settled) >= limit and anchor is not None:
+                break
+            for neighbor in snapshot.neighbors(concept):
+                edge = snapshot.edges[tuple(sorted((concept, neighbor)))]
+                other = snapshot.nodes[neighbor]
+                candidate = cost + snapshot.methodology.cost(
+                    edge.similarity, node.understanding or 1.0, other.understanding or 1.0,
+                    edge.familiarity)
+                if candidate < distance.get(neighbor, float("inf")):
+                    distance[neighbor], toward[neighbor] = candidate, concept
+                    heapq.heappush(queue, (candidate, neighbor))
+        if anchor is None:
+            foundations = [c for c in settled if c in self.curriculum.by_id
+                           and self.curriculum.by_id[c].level == 0]
+            anchor = foundations[0] if foundations else target
+        path = [anchor]
+        while path[-1] != target:
+            path.append(toward[path[-1]])
+
+        def describe(c):
+            node = snapshot.nodes[c]
+            return {"id": c, "name": node.label, "description": node.description,
+                    "understanding": node.understanding,
+                    "known": (node.understanding or 0) >= KNOWN,
+                    "distance_to_goal": distance[c]}
+
+        return {"formula_id": snapshot.methodology.formula_id,
+                "unassessed_planning_value": 1.0,
+                "nearest_concepts": [describe(c) for c in settled[:limit]],
+                "teaching_sequence": [describe(c) for c in path[:32]],
+                "sequence_truncated": len(path) > 32,
+                "instruction": "Bridge from the first familiar idea through the ordered teaching sequence. "
+                               "Treat unassessed ideas as unknown. Teach only the current step with a diagram; "
+                               "honor requests to review or go deeper even when the goal is known."}
 
     # ---- writing -------------------------------------------------------------------------
     def _link(self, human, concept_ids):
@@ -286,7 +342,7 @@ class Goals:
                                   provenance={"rule": "min endpoint understanding at first link"})
                     snapshot = human.snapshot()
 
-    def record(self, user, concept_id, score, method, provenance, previous=None):
+    def record(self, user, concept_id, score, method, provenance, previous=None, link_missing=True):
         """One graded observation: add or update the concept, link it, rate the edge just crossed."""
         human = self.graph.human(user)
         with self.graph.transaction():
@@ -295,7 +351,8 @@ class Goals:
                 human.assess_understanding(concept_id, score, method=method, provenance=provenance)
             else:
                 human.add_concept(concept_id, understanding=score, method=method, provenance=provenance)
-            self._link(human, [concept_id])
+            if link_missing:
+                self._link(human, [concept_id])
             edge = tuple(sorted((concept_id, previous))) if previous else None
             if edge in human.snapshot().edges:
                 human.assess_familiarity(previous, concept_id, score, method=method, provenance=provenance)
@@ -321,7 +378,7 @@ class Goals:
     def progress(self, user, concept_id, score, previous, expected_revision, key):
         """A lesson self-rating: updates or adds the concept, and the edge just learned across."""
         human = self.graph.human(user)
-        self.curriculum.topic(concept_id)
+        self.graph.god.get_concept(concept_id)
         with self.graph.transaction():
             snapshot = human.snapshot()
             if concept_id in snapshot.nodes:

@@ -15,16 +15,25 @@ The app decides what to teach and draws a diagram for everything; you are its ea
 Never teach, grade or explain on your own, and never invent numbers. Instead, call the tutor
 tool with the learner's own words, then let the app read its steps aloud:
 - action goal: they say what they want to learn ("I want to understand derivatives").
+- action review: they want to revisit or practice a topic, even one they already know.
+- action deeper: they ask to learn more, go further, or see another example. This takes
+  priority over a pending question: a request for teaching is not an answer to grade.
 - action answer: a question is pending (awaiting_answer) and they reply to it, even "I don't know".
-- action confused: they sound unsure, lost, frustrated or say something is unclear ("wait, why?",
-  "I don't get it", a hesitant answer about the explanation). Pass what they said.
+- action confused: they explicitly ask for help or an explanation ("wait, why?", "I don't get it").
+  A thinking pause or hesitant answer is not itself confusion. Pass what they said.
 - action question: they ask something new.
-- action continue: "okay", "next", "go on", or silence after a lesson.
+- action continue: an explicit "okay", "next", or "go on". Silence is never a request to continue.
 - action explore: they just want to see a topic without a learning goal.
+- action recall: they want to test their memory of a named topic without seeing its explanation.
+- action warmup: they want the suggested spaced-repetition warm-up.
+- action skip: they explicitly want to skip a question. Never treat silence as permission to skip.
+The tutor deliberately pauses after small steps. Wait for an answer; never automatically continue
+past a prediction, synthesis task, or teach-back question. Effortful thinking is part of learning.
 Learners often pause to think mid-answer: wait until they have clearly finished before calling
 the tool. When you call it, you may first say one very short acknowledgement such as "Let me see."
 When asked to read a script, say exactly that text and nothing else, then stop and listen.
-Never mention routes, scores or that the next topic was chosen for them."""
+The learner controls the goal and may always review, go deeper, or change topics.
+Never speak internal scores or traversal costs."""
 
 TOOLS = [{
     "type": "function",
@@ -34,7 +43,7 @@ TOOLS = [{
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["goal", "answer", "confused", "question", "continue", "explore"]},
+            "action": {"type": "string", "enum": ["goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup", "skip"]},
             "text": {"type": "string", "description": "The learner's words, as close to verbatim as possible."},
         },
         "required": ["action", "text"],

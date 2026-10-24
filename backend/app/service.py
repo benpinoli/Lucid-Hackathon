@@ -1,5 +1,7 @@
 """Single-process coordinator. Locks never span network sends or provider calls."""
 from collections import OrderedDict
+from copy import deepcopy
+from dataclasses import fields
 from threading import RLock
 from time import monotonic
 from uuid import uuid4
@@ -68,7 +70,13 @@ class TutorService:
         if route_to:
             teaching = self.goals.route_lesson(user, route_to)
         elif concept:
-            teaching = self.goals.concept_lesson(concept)
+            if self.tutor:
+                self.graph.god.get_concept(concept)
+                teaching, _ = self.tutor._lesson(concept, user, Session(target=concept))
+                teaching.concept_id = concept
+                teaching.graph_context = self.tutor._context(user, Session(target=concept), concept)
+            else:
+                teaching = self.goals.concept_lesson(concept)
         else:
             teaching = self.planner(text)
             if self.goals is not None:
@@ -89,11 +97,25 @@ class TutorService:
                 raise Conflict("Stale turn epoch; request snapshot")
             session = self.sessions.setdefault(lesson, Session())
         with session.lock:
-            teaching = self.tutor.act(session, user, action, text)
-        planned = monotonic()
+            with self.lock:
+                if self.owned(user, lesson).epoch != expected_epoch:
+                    raise Conflict("Stale turn epoch; request snapshot")
+            working = Session(**{f.name: deepcopy(getattr(session, f.name)) for f in fields(Session)
+                                 if f.name not in ("lock", "validate_write")})
+            working.lock = session.lock
+            working.validate_write = lambda: self._validate_tutor_epoch(user, lesson, expected_epoch)
+            teaching = self.tutor.act(working, user, action, text)
+            planned = monotonic()
+            with self.lock:
+                self.snapshots.clear()  # Graded answers may have changed personal scores.
+                result = self._commit(user, lesson, expected_epoch, teaching, started, planned)
+                self.sessions[lesson] = working
+                return result
+
+    def _validate_tutor_epoch(self, user, lesson, expected_epoch):
         with self.lock:
-            self.snapshots.clear()  # Graded answers may have changed personal scores.
-        return self._commit(user, lesson, expected_epoch, teaching, started, planned)
+            if self.owned(user, lesson).epoch != expected_epoch:
+                raise Conflict("Lesson changed while grading; no assessment recorded")
 
     def _commit(self, user, lesson, expected_epoch, teaching, started, planned):
         with self.lock:

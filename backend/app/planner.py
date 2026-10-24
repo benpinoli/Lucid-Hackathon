@@ -13,7 +13,7 @@ from typing import Literal
 import anthropic
 from pydantic import BaseModel, ConfigDict, create_model
 
-from .learning import LessonError, LessonPlan, dijkstra_lesson, mean_value_lesson, plan, vector_projection
+from .learning import LessonError, LessonPlan, complex_quadratic_lesson, dijkstra_lesson, mean_value_lesson, plan, vector_projection
 
 log = logging.getLogger("lucid.planner")
 
@@ -34,6 +34,8 @@ Recipes and their limits:
   b - a >= 0.5, and |f(x)| <= 3.8 on [a, b]. Use the learner's function if it is a polynomial
   of degree 3 or less and fits; otherwise pick a close polynomial that does.
 - none: the request is not about any of these topics.
+- complex_quadratic: a genuine 3D diagram of az^2+bz+c with real coefficients a,b,c,
+  |coefficient| <= 10, |a| >= .01, roots within -3..3 in the complex plane.
 
 Set recipe, fill in only that recipe's parameter object, and set the others to null.
 If the learner's values break a limit, use the nearest valid example instead."""
@@ -67,13 +69,20 @@ class MeanValueParams(_Choice):
     b: float
 
 
+class QuadraticParams(_Choice):
+    a: float
+    b: float
+    c: float
+
+
 class LessonChoice(_Choice):
     # An enum plus one nullable parameter object per recipe: the SDK strips `const`, so a
     # union of tagged objects would leave the tag unconstrained; an enum is enforced.
-    recipe: Literal["vector_projection", "dijkstra", "mean_value", "none"]
+    recipe: Literal["vector_projection", "dijkstra", "mean_value", "complex_quadratic", "none"]
     vector_projection: VectorParams | None
     dijkstra: DijkstraParams | None
     mean_value: MeanValueParams | None
+    complex_quadratic: QuadraticParams | None = None
 
 
 def build(choice: LessonChoice) -> LessonPlan | None:
@@ -87,6 +96,8 @@ def build(choice: LessonChoice) -> LessonPlan | None:
     if choice.recipe == "dijkstra":
         return dijkstra_lesson(params.nodes, [(e.a, e.b, e.weight) for e in params.edges],
                                params.source, params.target)
+    if choice.recipe == "complex_quadratic":
+        return complex_quadratic_lesson(params.a, params.b, params.c)
     return mean_value_lesson(params.coefficients, params.a, params.b)
 
 

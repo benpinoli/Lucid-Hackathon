@@ -1,12 +1,16 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { evaluateSource } from './expressions';
 import type { SceneNode } from './protocol';
+import { sampleSurface } from './geometry';
+import { GrabManager } from './manipulation';
 
 const CLIP = 7; // Board units; formula geometry beyond this is not drawn (curves break there).
 
 const colors = { primary: 0x71ead5, secondary: 0xf4b477, muted: 0x7f96ab };
+const vector = (point: number[], depth = 0) => new THREE.Vector3(point[0], point[1], point[2] ?? depth);
 function disposeTree(root: THREE.Object3D) {
   root.traverse(object => {
     const mesh = object as THREE.Mesh;
@@ -37,6 +41,11 @@ export class LessonRenderer {
   private scene = new THREE.Scene();
   private camera = new THREE.PerspectiveCamera(48, 1, 0.05, 100);
   private controls: OrbitControls;
+  private transform: TransformControls;
+  private grab = new GrabManager();
+  private grabWholeModel = true;
+  private manipulationMode: 'orbit' | 'translate' | 'rotate' = 'orbit';
+  private placements = new Map<string, { position: THREE.Vector3; quaternion: THREE.Quaternion; scale: THREE.Vector3 }>();
   private board = new THREE.Group();
   private caption = new THREE.Group();
   private xrButtons = new THREE.Group();
@@ -69,6 +78,13 @@ export class LessonRenderer {
     this.controls.minDistance = 1; this.controls.maxDistance = 12;
     this.board.position.set(0, 1.45, -2.5); this.board.scale.setScalar(0.23);
     this.scene.add(this.board, this.caption, this.xrButtons);
+    this.transform = new TransformControls(this.camera, this.renderer.domElement);
+    this.scene.add(this.transform.getHelper());
+    this.transform.addEventListener('dragging-changed', event => {
+      this.controls.enabled = !event.value && this.manipulationMode === 'orbit' && !this.renderer.xr.isPresenting;
+    });
+    this.renderer.domElement.addEventListener('pointerdown', this.selectObject);
+    this.raycaster.params.Line = { threshold: 0.04 };
     this.board.add(this.marker);
     const floor = new THREE.GridHelper(20, 40, 0x294653, 0x1b303e); floor.position.y = -0.01; this.scene.add(floor);
     this.caption.position.set(0, 0.48, -2.5);
@@ -84,7 +100,14 @@ export class LessonRenderer {
       const controller = this.renderer.xr.getController(i);
       const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, -4)]), new THREE.LineBasicMaterial({ color: 0x71ead5 }));
       controller.add(line); this.scene.add(controller);
-      controller.addEventListener('select', () => {
+      controller.addEventListener('squeezestart', () => this.grabFrom(controller));
+      controller.addEventListener('squeezeend', () => this.grab.release(controller));
+      controller.addEventListener('disconnected', () => this.grab.release(controller));
+      // Hand-tracked pinch uses select; controller triggers keep their existing slider behavior.
+      controller.addEventListener('selectstart', event => { if (event.data?.hand) this.grabFrom(controller); });
+      controller.addEventListener('selectend', event => { if (event.data?.hand) this.grab.release(controller); });
+      controller.addEventListener('select', event => {
+        if (event.data?.hand) return;
         this.rotation.extractRotation(controller.matrixWorld);
         this.raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
         this.raycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.rotation);
@@ -97,8 +120,8 @@ export class LessonRenderer {
     // Override VRButton's viewport positioning so it belongs to the scene toolbar.
     this.vrButton.style.cssText += ';position:static;width:auto;bottom:auto;left:auto;transform:none;margin:0;';
     xrHost.append(this.vrButton);
-    this.renderer.xr.addEventListener('sessionstart', () => { this.controls.enabled = false; this.xrButtons.visible = !!this.xrActions; });
-    this.renderer.xr.addEventListener('sessionend', () => { this.controls.enabled = true; this.xrButtons.visible = false; this.resetView(); });
+    this.renderer.xr.addEventListener('sessionstart', () => { this.transform.detach(); this.controls.enabled = false; this.xrButtons.visible = !!this.xrActions; });
+    this.renderer.xr.addEventListener('sessionend', () => { this.grab.releaseAll(); this.controls.enabled = this.manipulationMode === 'orbit'; this.xrButtons.visible = false; this.resetView(); });
     this.observer = new ResizeObserver(() => {
       const { width, height } = host.getBoundingClientRect();
       if (!width || !height) return;
@@ -118,7 +141,63 @@ export class LessonRenderer {
     });
   }
   resetView() { this.camera.position.set(0, 1.6, 1.1); this.controls.target.set(0, 1.45, -2.5); this.controls.update(); }
-  setFocus(ids: string[]) { this.focus = new Set(ids); this.render(this.nodes, this.params); }
+  setManipulation(mode: 'orbit' | 'translate' | 'rotate', wholeModel = this.grabWholeModel) {
+    this.manipulationMode = mode; this.grabWholeModel = wholeModel;
+    this.controls.enabled = mode === 'orbit' && !this.renderer.xr.isPresenting;
+    this.transform.detach();
+    if (mode !== 'orbit' && !this.renderer.xr.isPresenting) {
+      this.transform.setMode(mode); this.transform.setSpace('world');
+      if (wholeModel) this.transform.attach(this.board);
+    }
+  }
+  /** New scene definitions reset placement; highlighting and slider updates retain it. */
+  beginScene() {
+    this.grab.releaseAll(); this.transform.detach(); this.placements.clear();
+    this.board.position.set(0, 1.45, -2.5); this.board.quaternion.identity(); this.board.scale.setScalar(0.23);
+    for (const child of this.board.children) if (child.userData.nodeId) {
+      child.position.set(0, 0, 0); child.quaternion.identity(); child.scale.set(1, 1, 1);
+    }
+  }
+  resetArrangement() { this.beginScene(); this.render(this.nodes, this.params); }
+  private selectObject = (event: PointerEvent) => {
+    if (this.manipulationMode === 'orbit' || this.grabWholeModel || this.transform.dragging || this.renderer.xr.isPresenting) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.raycaster.setFromCamera(new THREE.Vector2((event.clientX - rect.left) / rect.width * 2 - 1,
+      -(event.clientY - rect.top) / rect.height * 2 + 1), this.camera);
+    const target = this.pickObject();
+    if (target) this.transform.attach(target);
+  };
+  private pickObject() {
+    this.board.updateWorldMatrix(true, true);
+    for (const hit of this.raycaster.intersectObjects(this.board.children, true)) {
+      let object = hit.object;
+      while (object.parent && object.parent !== this.board) object = object.parent;
+      if (object.parent === this.board && object.userData.nodeId && object.name !== 'axes' && object.name !== 'title') return object;
+    }
+    return undefined;
+  }
+  private grabFrom(controller: THREE.Object3D) {
+    this.rotation.extractRotation(controller.matrixWorld);
+    this.raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
+    this.raycaster.ray.direction.set(0, 0, -1).applyMatrix4(this.rotation);
+    const target = this.pickObject();
+    if (target) { this.transform.detach(); this.grab.begin(controller, this.grabWholeModel ? this.board : target); }
+  }
+  setFocus(ids: string[]) {
+    this.focus = new Set(ids);
+    this.scene.traverse(object => { if (object.userData.nodeId) this.styleFocus(object, object.name); });
+  }
+  private styleFocus(group: THREE.Object3D, id: string) {
+    const dimmed = this.focus.size > 0 && !this.focus.has(id);
+    group.traverse(object => {
+      const material = (object as THREE.Mesh).material;
+      for (const m of material ? (Array.isArray(material) ? material : [material]) : []) {
+        if (typeof m.userData.lucidOpacity !== 'number') m.userData.lucidOpacity = m.opacity;
+        const base = m.userData.lucidOpacity as number;
+        m.opacity = base * (dimmed ? 0.4 : 1); m.transparent = m.opacity < 1;
+      }
+    });
+  }
   setXRInterrupt(action?: () => void) { this.xrInterrupt = action; }
   /** Quiet provenance marker in the board's top-right corner, visible in VR too. */
   setMarker(text?: string) {
@@ -146,22 +225,36 @@ export class LessonRenderer {
   /** Rebuilds the board. Formula primitives are evaluated with `params` (slider values). */
   render(nodes: SceneNode[], params: Record<string, number> = {}) {
     this.nodes = nodes; this.params = params;
+    const held = this.grab.entries();
+    this.grab.releaseAll();
+    const selected = this.transform.object?.userData.nodeId as string | undefined;
+    this.transform.detach();
+    for (const child of this.board.children) if (child.userData.nodeId) this.placements.set(child.name, {
+      position: child.position.clone(), quaternion: child.quaternion.clone(), scale: child.scale.clone() });
     this.board.remove(this.marker); disposeTree(this.board); this.board.add(this.marker);
     for (const node of nodes) {
       if (!node.visible) continue;
-      const group = new THREE.Group(); group.name = node.id;
+      const group = new THREE.Group(); group.name = node.id; group.userData.nodeId = node.id;
       const color = colors[node.style]; const c = node.content;
       const line = (points: number[][], tint = color) => {
-        const geometry = new THREE.BufferGeometry().setFromPoints(points.map(([x, y]) => new THREE.Vector3(x, y, 0)));
+        const geometry = new THREE.BufferGeometry().setFromPoints(points.map(point => vector(point)));
         group.add(new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: tint })));
       };
       if (c.primitive === 'axes2d') {
         for (let x = -c.extent; x <= c.extent; x++) line([[x, -c.extent], [x, c.extent]], 0x223c49);
         for (let y = -c.extent; y <= c.extent; y++) line([[-c.extent, y], [c.extent, y]], 0x223c49);
         line([[-c.extent, 0], [c.extent, 0]], 0x557a8a); line([[0, -c.extent], [0, c.extent]], 0x557a8a);
+      } else if (c.primitive === 'axes3d') {
+        const axisColors = [0xf4b477, 0x71ead5, 0x9eafff];
+        for (let axis = 0; axis < 3; axis++) {
+          const a = [0, 0, 0], b = [0, 0, 0]; a[axis] = -c.extent; b[axis] = c.extent;
+          line([a, b], axisColors[axis]);
+          const name = label(c.labels[axis], new THREE.Color(axisColors[axis]).getStyle(), 3, 0.4, true);
+          name.position.copy(vector(b).multiplyScalar(1.12)); group.add(name);
+        }
       } else if (c.primitive === 'vector_arrow') {
-        const start = new THREE.Vector3(...c.start, node.id === 'projection' ? 0.04 : 0.02);
-        const end = new THREE.Vector3(...c.end, start.z); const delta = end.clone().sub(start); const size = delta.length();
+        const start = vector(c.start, node.id === 'projection' ? 0.04 : 0.02);
+        const end = vector(c.end, start.z); const delta = end.clone().sub(start); const size = delta.length();
         if (size > 0.00001) group.add(new THREE.ArrowHelper(delta.normalize(), start, size, color, Math.min(0.3, size * 0.3), Math.min(0.17, size * 0.15)));
         const name = label(node.id, new THREE.Color(color).getStyle(), node.id === 'projection' ? 2.2 : 1, 0.7);
         name.position.copy(end).add(new THREE.Vector3(0.25, node.id === 'projection' ? -0.4 : 0.4, 0.08)); group.add(name);
@@ -171,36 +264,54 @@ export class LessonRenderer {
         const runs: number[][][] = [[]];
         for (let i = 0; i < c.samples; i++) {
           const scope = { ...params, t: c.t_min + (c.t_max - c.t_min) * i / (c.samples - 1) };
-          const x = evaluateSource(c.x, scope), y = evaluateSource(c.y, scope);
-          if (Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) <= CLIP && Math.abs(y) <= CLIP) runs[runs.length - 1].push([x, y]);
+          const x = evaluateSource(c.x, scope), y = evaluateSource(c.y, scope), z = c.z ? evaluateSource(c.z, scope) : 0;
+          if ([x, y, z].every(v => Number.isFinite(v) && Math.abs(v) <= CLIP)) runs[runs.length - 1].push([x, y, z]);
           else if (runs[runs.length - 1].length) runs.push([]);
         }
         for (const run of runs) if (run.length > 1) line(run);
       } else if (c.primitive === 'expr_arrow') {
-        const [sx, sy, ex, ey] = [...c.start, ...c.end].map(source => evaluateSource(source, params));
-        if ([sx, sy, ex, ey].every(v => Number.isFinite(v) && Math.abs(v) <= CLIP)) {
-          const start = new THREE.Vector3(sx, sy, 0.02); const delta = new THREE.Vector3(ex - sx, ey - sy, 0); const size = delta.length();
+        const a = c.start.map(source => evaluateSource(source, params)), b = c.end.map(source => evaluateSource(source, params));
+        if ([...a, ...b].every(v => Number.isFinite(v) && Math.abs(v) <= CLIP)) {
+          const start = vector(a, 0.02); const delta = vector(b, 0.02).sub(start); const size = delta.length();
           if (size > 0.00001) group.add(new THREE.ArrowHelper(delta.normalize(), start, size, color, Math.min(0.3, size * 0.3), Math.min(0.17, size * 0.15)));
         }
       } else if (c.primitive === 'expr_point') {
-        const [x, y] = c.at.map(source => evaluateSource(source, params));
-        if (Number.isFinite(x) && Number.isFinite(y) && Math.abs(x) <= CLIP && Math.abs(y) <= CLIP) {
-          line(Array.from({ length: 13 }, (_, i) => [x + 0.13 * Math.cos(i * Math.PI / 6), y + 0.13 * Math.sin(i * Math.PI / 6)]), 0xf4b477);
-          if (c.text) { const sprite = label(c.text, '#d5e8ee', 6, 0.5, true); sprite.position.set(x + 0.35, y + 0.45, 0.1); group.add(sprite); }
+        const at = c.at.map(source => evaluateSource(source, params));
+        const [x, y, z = 0] = at;
+        if (at.every(v => Number.isFinite(v) && Math.abs(v) <= CLIP)) {
+          if (at.length === 3) {
+            const sphere = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 12), new THREE.MeshBasicMaterial({ color: 0xf4b477 }));
+            sphere.position.copy(vector(at)); group.add(sphere);
+          } else line(Array.from({ length: 13 }, (_, i) => [x + 0.13 * Math.cos(i * Math.PI / 6), y + 0.13 * Math.sin(i * Math.PI / 6)]), 0xf4b477);
+          if (c.text) { const sprite = label(c.text, '#d5e8ee', 6, 0.5, true); sprite.position.set(x + 0.35, y + 0.45, z + 0.1); group.add(sprite); }
         }
+      } else if (c.primitive === 'expr_surface') {
+        const mesh = sampleSurface(c, params);
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(mesh.positions, 3)); geometry.setIndex(mesh.indices);
+        group.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color, wireframe: true,
+          side: THREE.DoubleSide, transparent: true, opacity: 0.55 })));
       }
       else if (c.primitive === 'text_label') {
         const sprite = label(c.text, '#d5e8ee', 9, 0.7, true);
-        sprite.position.set(c.position[0], c.position[1] + (node.id === 'formula' ? -4.2 : 0), 0.1); group.add(sprite);
+        sprite.position.set(c.position[0], c.position[1] + (node.id === 'formula' ? -4.2 : 0), c.position[2] ?? 0.1); group.add(sprite);
       }
-      if (this.focus.size && !this.focus.has(node.id)) group.traverse(object => {
-        const material = (object as THREE.Mesh).material;
-        if (material && !Array.isArray(material)) { material.transparent = true; material.opacity = 0.4; }
-      });
+      this.styleFocus(group, node.id);
       this.board.add(group);
+      const placement = this.placements.get(node.id);
+      if (placement) { group.position.copy(placement.position); group.quaternion.copy(placement.quaternion); group.scale.copy(placement.scale); }
+      if (selected === node.id && this.manipulationMode !== 'orbit' && !this.renderer.xr.isPresenting) this.transform.attach(group);
+    }
+    if (this.grabWholeModel && this.manipulationMode !== 'orbit' && !this.renderer.xr.isPresenting) this.transform.attach(this.board);
+    // Slider/scene updates replace geometry, but a held object's grip remains active.
+    for (const grip of held) {
+      const target = grip.object === this.board ? this.board : this.board.children.find(child => child.name === grip.object.name);
+      if (target) this.grab.begin(grip.controller, target);
     }
   }
   dispose() {
+    this.grab.releaseAll(); this.transform.detach(); this.scene.remove(this.transform.getHelper()); this.transform.dispose();
+    this.renderer.domElement.removeEventListener('pointerdown', this.selectObject);
     this.observer.disconnect(); this.renderer.setAnimationLoop(null); this.controls.dispose();
     void this.renderer.xr.getSession()?.end(); disposeTree(this.scene); this.renderer.dispose();
     this.renderer.domElement.remove(); this.vrButton.remove();

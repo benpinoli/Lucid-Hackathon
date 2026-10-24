@@ -52,7 +52,7 @@ source and target; a cubic-or-lower polynomial on an interval). They compute eve
 label and sentence and reject parameters outside the view or scene budget.
 
 **Conversational tutor.** `backend/app/tutor.py` runs one session per lesson. Clients send
-`{"type": "tutor", "action": "goal|answer|confused|question|continue|explore", "text": ...,
+`{"type": "tutor", "action": "goal|answer|confused|question|continue|explore|review|deeper|recall|warmup|skip", "text": ...,
 "expected_epoch": n}` over the scene WebSocket (or `POST /api/lessons/{id}/tutor`); every reply is
 a normal `lesson.turn` whose plan carries `tutor: {mode, awaiting_answer, goal}`.
 
@@ -73,6 +73,79 @@ a normal `lesson.turn` whose plan carries `tutor: {mode, awaiting_answer, goal}`
 - *New concepts*: goals or prerequisites the graph lacks are created by Claude and written to the
   shared God Brain through the engine's proposal API (submitted and accepted, with `claude:<model>`
   provenance), linked only to concepts they directly build on.
+- *Learner control*: requesting an already-known goal teaches it again with a deeper explanation.
+  `review` and `deeper` work during and after lessons. Requests such as "learn more" take priority
+  over grading a pending answer. `continue` after completion reopens teaching. The frontend also
+  exposes Review, Go deeper, and Ask a question buttons.
+- *Autonomous growth*: generated explanations extract up to six atomic facts with definitions,
+  formulas and direct links. A single audited proposal creates missing facts and links, including
+  links between facts from the same explanation. Existing concepts and edges are reused without
+  changing shared ratings. Specific topics such as even functions resolve before broad aliases.
+- *Saved lessons*: validated generated plans, geometry and checks are persisted per learner and
+  concept in `lucid_lessons_v1` in the same SQLite database. This additive backend-owned artifact
+  table is created idempotently and does not alter memory-engine tables or migrations. Generated
+  lessons can be reused without Claude and survive restarts. `GET /api/users/{id}/lessons` lists
+  saved concept IDs; a normal scene turn with `concept` loads or authors a lesson for any God Brain
+  concept. Individual extracted facts get their own lesson when selected. Saved exposure never
+  implies mastery; personal understanding still requires an assessment or self-rating.
+- *Context*: the writer receives nearby concepts ranked by Dijkstra traversal cost and an ordered
+  bridge from the closest reachable known concept (or a foundation) to the teaching target.
+  Unknown scores remain null in the prompt; a temporary planning value of 1 is used only to
+  search shared topology and is never saved as an assessment. The active engine cost formula
+  computes traversal costs separately from similarity, understanding and familiarity.
+
+See [voice, memory and visual teaching flow](../docs/TUTOR_ARCHITECTURE.md) for the API map,
+prompt responsibilities, persistence boundaries and fallbacks.
+
+**Learning as retrieval practice.** Guided lessons, including Explore, reveal one short teaching
+beat at a time. With the author enabled, each step gets a prediction or explanation task and
+rubric-based feedback; an incorrect microanswer gets one corrective retry. Without the author,
+curriculum lessons use an authored prediction and explicit self-explanation pauses. Continue
+repeats a pending question; only an explicit Skip bypasses it, without awarding mastery.
+Future focused geometry stays hidden until its step. Asking a side question preserves the
+pending task. Review and clarification use the same small-step flow.
+
+After the final check, the AI tutor looks for a direct God edge to another known concept
+that is absent from the personal edge set (or only has a legacy derived score). It asks a
+concrete synthesis task and records the graded result as `synthesis_retrieval` familiarity.
+It never creates an edge between disconnected or distant concepts. It then asks a teach-back;
+when no eligible direct connection exists, it goes straight to teach-back. A private rubric is
+written before the answer, and the LLM returns a 1-10 score, demonstrated criteria, missing
+criteria and corrective feedback. Teach-back/recall updates understanding as `active_recall`.
+AI-backed diagnostic and check scores do not automatically create personal edges. The older
+batch diagnostic API still uses its documented derived links; these are eligible for synthesis
+testing later. Grader outages preserve the question and do not change mastery or the schedule.
+
+**Spaced reviews.** `reviews.py` uses pinned `fsrs==6.3.2`, default model parameters, 90% desired
+retention and no random scheduling fuzz. Backend-owned `lucid_review_cards_v1`,
+`lucid_review_logs_v1` and `lucid_practice_attempts_v1` tables persist in the graph's SQLite
+database without altering memory-engine tables. `GET /api/me/reviews` returns personal mastery,
+last scored review, next due timestamp, stability, difficulty, estimated recall probability and
+`forgetting_score = 1 - recall_probability`, plus retrieval-attempt counts by kind. Timestamps
+are UTC; the browser displays dates locally. Existing assessments without review history are
+due now with unknown recall probability, rather than an invented last-review date.
+
+The opening learning-day panel offers new learning or an optional warm-up. `warmup` interleaves
+up to five due topics; `recall` tests a named/current topic without first showing its lesson.
+A warm-up can restore a pending lesson question. Skip does not update scores or scheduling.
+Microcheck evidence is audited but does not count as an independent spaced review. Immediate
+post-teaching checks and teach-backs cannot receive FSRS's Easy rating; delayed recall can.
+Model estimates are separate from assessed mastery and never change Dijkstra weights.
+
+**Spatial lessons and interaction.** Scene v1 is extended additively with `axes3d`, 2/3-coordinate
+points and arrows, optional parametric curve depth, `expr_surface` meshes and `lesson_xyz`.
+The author sets `dimensions: 3` and can write surfaces in bounded `u,v` parameter intervals;
+the compiler validates expressions and default geometry, with at most three surfaces and
+40x40 samples per surface. The client omits invalid/clipped triangles and never loads arbitrary
+assets or code. `complex_quadratic` is a verified recipe with real coefficients a,b,c, including
+the default z²+1 example; its marked roots satisfy both real and imaginary output equations.
+
+Desktop users can orbit or use Move/Rotate handles on the whole model or selected objects.
+In WebXR, pointing and squeezing a controller grip grabs; controller motion and orientation
+move and rotate the held object, and releasing places it. Hand pinch uses select events where
+available. Placements survive highlights, local sliders and steps within a concept; a different
+concept or Reset arrangement restores authored placement. These are local study manipulations,
+not edits to the graph or mathematical parameters. Physical headset acceptance remains unmeasured.
 
 **Diagram language.** `backend/app/diagrams.py`: formulas (parametric curves), arrows, points,
 labels and node-edge graphs, plus up to three sliders binding single-letter parameters. LUCID
@@ -126,7 +199,8 @@ to confirm receipt; this does not claim a frame was displayed. Ping with snapsho
 
 HTTP turns return events to their caller. WS turns return events to that socket. Other sockets
 must request a snapshot; this initial transport does not broadcast. There is no arbitrary client scene-write endpoint.
-All scene commands are server-authored. No provider or inference call is made.
+All scene commands are server-authored. Provider calls are optional and occur when a planner,
+lesson author or voice provider is configured.
 For graph-aware teaching, add explicit stable `sources` and `target` IDs to a turn; scores are never invented.
 Use the user-scoped learning-path, assessments and history endpoints in `/docs`.
 Assessments require current human revision and an idempotency key. A stale revision returns 409;

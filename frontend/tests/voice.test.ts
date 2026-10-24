@@ -30,6 +30,20 @@ beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'pe
 afterEach(() => { vi.useRealTimers(); });
 
 describe('voice narrator', () => {
+  it.each(['review', 'deeper'])('forwards %s and graph context while a check is pending', async action => {
+    const reply: Plan = { ...asking, graph_context: { teaching_sequence: [{ name: 'Functions' }, { name: 'Derivatives' }] } };
+    const tutor = vi.fn(async () => reply);
+    const { narrator, sent, creates } = setup(tutor);
+    narrator.handle({ type: 'response.done', response: { id: 'tool', status: 'completed', output: [
+      { type: 'function_call', name: 'tutor', call_id: 'more', arguments: JSON.stringify({ action, text: 'teach me more' }) },
+    ] } });
+    await vi.waitFor(() => expect(creates()).toHaveLength(1));
+    expect(tutor).toHaveBeenCalledWith(action, 'teach me more');
+    const output = JSON.parse(sent.find(event => event.item?.type === 'function_call_output').item.output);
+    expect(output.learning_context).toEqual(reply.graph_context);
+    expect(output.awaiting_answer).toBe(true);
+  });
+
   it('speaks a whole reply as one response, highlighting on the playback clock', async () => {
     const { narrator, sent, focused, mic, statuses, creates, play, finish, tutor } = setup();
     narrator.handle({ type: 'response.created', response: { id: 'tool' } });

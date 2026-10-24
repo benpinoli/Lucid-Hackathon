@@ -12,11 +12,11 @@ import math
 import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .expressions import ExpressionError, compile_expression
 from .learning import LessonError, LessonPlan, TeachingBeat, _layout
-from .scene import (Axes, Curve, ExprArrow, ExprCurve, ExprPoint, Label, MAX_OBJECTS, Node, Slider)
+from .scene import (Axes, Axes3D, Curve, ExprArrow, ExprCurve, ExprPoint, ExprSurface, Label, MAX_OBJECTS, Node, Slider)
 
 ID = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 VIEW = 6.0  # Anything at the default slider values must sit within this box.
@@ -39,6 +39,7 @@ class DCurve(_Spec):
     id: str
     x: str
     y: str
+    z: str | None = None
     t_min: float
     t_max: float
     style: Literal["primary", "secondary", "muted"]
@@ -50,6 +51,8 @@ class DArrow(_Spec):
     start_y: str
     end_x: str
     end_y: str
+    start_z: str = "0"
+    end_z: str = "0"
     style: Literal["primary", "secondary", "muted"]
 
 
@@ -57,6 +60,7 @@ class DPoint(_Spec):
     id: str
     x: str
     y: str
+    z: str = "0"
     text: str | None
 
 
@@ -65,6 +69,19 @@ class DLabel(_Spec):
     text: str
     x: float
     y: float
+    z: float = 0.0
+
+
+class DSurface(_Spec):
+    id: str
+    x: str
+    y: str
+    z: str
+    u_min: float
+    u_max: float
+    v_min: float
+    v_max: float
+    style: Literal["primary", "secondary", "muted"] = "primary"
 
 
 class DGraphNode(_Spec):
@@ -85,6 +102,7 @@ class DGraph(_Spec):
 
 
 class Diagram(_Spec):
+    dimensions: Literal[2, 3] = 2
     axes: bool
     sliders: list[DSlider]
     curves: list[DCurve]
@@ -92,6 +110,7 @@ class Diagram(_Spec):
     points: list[DPoint]
     labels: list[DLabel]
     graph: DGraph | None
+    surfaces: list[DSurface] = Field(default_factory=list, max_length=3)
 
 
 class DBeat(_Spec):
@@ -131,7 +150,7 @@ def _inside(*values):
 def compile_lesson(lesson: DiagramLesson, recipe_id="diagram_v1", generated=False) -> LessonPlan:
     d = lesson.diagram
     nodes, focus = [], {}
-    seen = set()
+    seen = {"title", "axes"}  # Compiler-owned IDs cannot be reused by generated elements.
 
     def claim(element_id):
         _check(bool(ID.match(element_id)), f"Element id {element_id!r} must be lowercase letters, digits, _")
@@ -147,44 +166,64 @@ def compile_lesson(lesson: DiagramLesson, recipe_id="diagram_v1", generated=Fals
         _check(slider.min < slider.max and slider.min <= slider.value <= slider.max
                and all(abs(v) <= 1000 for v in (slider.min, slider.max)), f"Slider {slider.name} needs min <= value <= max")
         params[slider.name] = slider.value
+        seen.add(f"slider_{slider.name}")
     allowed = set(params)
+    if d.surfaces:
+        _check(d.dimensions == 3, "Surfaces require dimensions=3")
+        _check(not ({"u", "v"} & allowed), "Surface parameters u and v cannot also be sliders")
 
     title = lesson.title.strip()[:60] or "Diagram"
     nodes.append(Node(id="title", content=Label(text=title, position=[0.0, 4.6])))
     focus["title"] = ["title"]
     if d.axes:
-        nodes.append(Node(id="axes", content=Axes()))
+        nodes.append(Node(id="axes", content=Axes3D() if d.dimensions == 3 else Axes()))
         focus["axes"] = ["axes"]
     for curve in d.curves:
         claim(curve.id)
         fx = _expr(curve.x, allowed | {"t"}, f"Curve {curve.id} x")
         fy = _expr(curve.y, allowed | {"t"}, f"Curve {curve.id} y")
+        fz = _expr(curve.z or "0", allowed | {"t"}, f"Curve {curve.id} z")
+        _check(d.dimensions == 3 or curve.z is None, "3D curves require dimensions=3")
         _check(curve.t_min < curve.t_max, f"Curve {curve.id} needs t_min < t_max")
         samples = [{**params, "t": curve.t_min + (curve.t_max - curve.t_min) * i / 63} for i in range(64)]
-        inside = sum(_inside(fx(s), fy(s)) for s in samples)
+        inside = sum(_inside(fx(s), fy(s), fz(s)) for s in samples)
         _check(inside >= 32, f"Curve {curve.id} is mostly outside the view (-{VIEW}..{VIEW}) at the default values")
         nodes.append(Node(id=curve.id, style=curve.style, content=ExprCurve(
-            x=curve.x, y=curve.y, t_min=curve.t_min, t_max=curve.t_max)))
+            x=curve.x, y=curve.y, z=curve.z, t_min=curve.t_min, t_max=curve.t_max)))
         focus[curve.id] = [curve.id]
     for arrow in d.arrows:
         claim(arrow.id)
-        coords = [_expr(e, allowed, f"Arrow {arrow.id}")(params)
-                  for e in (arrow.start_x, arrow.start_y, arrow.end_x, arrow.end_y)]
+        start = [arrow.start_x, arrow.start_y] + ([arrow.start_z] if d.dimensions == 3 else [])
+        end = [arrow.end_x, arrow.end_y] + ([arrow.end_z] if d.dimensions == 3 else [])
+        coords = [_expr(e, allowed, f"Arrow {arrow.id}")(params) for e in start + end]
         _check(_inside(*coords), f"Arrow {arrow.id} must lie within the view at the default values")
         nodes.append(Node(id=arrow.id, style=arrow.style, content=ExprArrow(
-            start=[arrow.start_x, arrow.start_y], end=[arrow.end_x, arrow.end_y])))
+            start=start, end=end)))
         focus[arrow.id] = [arrow.id]
     for point in d.points:
         claim(point.id)
-        coords = [_expr(e, allowed, f"Point {point.id}")(params) for e in (point.x, point.y)]
+        at = [point.x, point.y] + ([point.z] if d.dimensions == 3 else [])
+        coords = [_expr(e, allowed, f"Point {point.id}")(params) for e in at]
         _check(_inside(*coords), f"Point {point.id} must lie within the view at the default values")
-        nodes.append(Node(id=point.id, content=ExprPoint(at=[point.x, point.y], text=point.text or None)))
+        nodes.append(Node(id=point.id, content=ExprPoint(at=at, text=point.text or None)))
         focus[point.id] = [point.id]
     for label in d.labels:
         claim(label.id)
-        _check(abs(label.x) <= 5.5 and abs(label.y) <= 5.5, f"Label {label.id} must be within -5.5..5.5")
-        nodes.append(Node(id=label.id, content=Label(text=label.text, position=[label.x, label.y])))
+        _check(_inside(label.x, label.y, label.z), f"Label {label.id} must be within the view")
+        nodes.append(Node(id=label.id, content=Label(text=label.text, position=[label.x, label.y] + ([label.z] if d.dimensions == 3 else []))))
         focus[label.id] = [label.id]
+    for surface in d.surfaces:
+        claim(surface.id)
+        _check(surface.u_min < surface.u_max and surface.v_min < surface.v_max, "Surface intervals must increase")
+        funcs = [_expr(e, allowed | {"u", "v"}, f"Surface {surface.id}") for e in (surface.x, surface.y, surface.z)]
+        samples = [{**params, "u": surface.u_min + (surface.u_max - surface.u_min) * i / 8,
+                    "v": surface.v_min + (surface.v_max - surface.v_min) * j / 8}
+                   for i in range(9) for j in range(9)]
+        _check(sum(_inside(*(f(s) for f in funcs)) for s in samples) >= 41,
+               f"Surface {surface.id} is mostly outside the view or undefined")
+        nodes.append(Node(id=surface.id, style=surface.style, content=ExprSurface(
+            **surface.model_dump(exclude={"id", "style"}))))
+        focus[surface.id] = [surface.id]
     if d.graph is not None:
         nodes += _graph(d.graph, claim, focus)
     for slider in d.sliders:
@@ -192,6 +231,8 @@ def compile_lesson(lesson: DiagramLesson, recipe_id="diagram_v1", generated=Fals
             binding=f"param.{slider.name}", label=slider.label[:40], minimum=slider.min,
             maximum=slider.max, value=slider.value)))
     _check(len(nodes) <= MAX_OBJECTS, f"Too many objects ({len(nodes)}); the limit is {MAX_OBJECTS}")
+    if d.dimensions == 3:
+        nodes = [node.model_copy(update={"coordinate_system": "lesson_xyz"}) for node in nodes]
     _check(1 <= len(lesson.beats) <= 6, "Use 1 to 6 beats")
     beats = []
     for i, beat in enumerate(lesson.beats, start=1):

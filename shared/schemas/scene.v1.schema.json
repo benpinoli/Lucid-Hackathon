@@ -16,7 +16,7 @@
             "minimum": -1000,
             "type": "number"
           },
-          "maxItems": 2,
+          "maxItems": 3,
           "minItems": 2,
           "title": "Start",
           "type": "array"
@@ -27,7 +27,7 @@
             "minimum": -1000,
             "type": "number"
           },
-          "maxItems": 2,
+          "maxItems": 3,
           "minItems": 2,
           "title": "End",
           "type": "array"
@@ -57,6 +57,38 @@
         }
       },
       "title": "Axes",
+      "type": "object"
+    },
+    "Axes3D": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "axes3d",
+          "default": "axes3d",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "extent": {
+          "default": 4.0,
+          "exclusiveMinimum": 0,
+          "maximum": 6,
+          "title": "Extent",
+          "type": "number"
+        },
+        "labels": {
+          "items": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[^<>\\x00-\\x1f]*$",
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Labels",
+          "type": "array"
+        }
+      },
+      "title": "Axes3D",
       "type": "object"
     },
     "Create": {
@@ -94,7 +126,7 @@
               "minimum": -1000,
               "type": "number"
             },
-            "maxItems": 2,
+            "maxItems": 3,
             "minItems": 2,
             "type": "array"
           },
@@ -125,7 +157,7 @@
             "minLength": 1,
             "type": "string"
           },
-          "maxItems": 2,
+          "maxItems": 3,
           "minItems": 2,
           "title": "Start",
           "type": "array"
@@ -136,7 +168,7 @@
             "minLength": 1,
             "type": "string"
           },
-          "maxItems": 2,
+          "maxItems": 3,
           "minItems": 2,
           "title": "End",
           "type": "array"
@@ -169,6 +201,20 @@
           "minLength": 1,
           "title": "Y",
           "type": "string"
+        },
+        "z": {
+          "anyOf": [
+            {
+              "maxLength": 160,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Z"
         },
         "t_min": {
           "maximum": 1000,
@@ -214,7 +260,7 @@
             "minLength": 1,
             "type": "string"
           },
-          "maxItems": 2,
+          "maxItems": 3,
           "minItems": 2,
           "title": "At",
           "type": "array"
@@ -241,6 +287,77 @@
       "title": "ExprPoint",
       "type": "object"
     },
+    "ExprSurface": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "expr_surface",
+          "default": "expr_surface",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "x": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "X",
+          "type": "string"
+        },
+        "y": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Y",
+          "type": "string"
+        },
+        "z": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Z",
+          "type": "string"
+        },
+        "u_min": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "U Min",
+          "type": "number"
+        },
+        "u_max": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "U Max",
+          "type": "number"
+        },
+        "v_min": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "V Min",
+          "type": "number"
+        },
+        "v_max": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "V Max",
+          "type": "number"
+        },
+        "samples": {
+          "default": 24,
+          "maximum": 40,
+          "minimum": 8,
+          "title": "Samples",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "z",
+        "u_min",
+        "u_max",
+        "v_min",
+        "v_max"
+      ],
+      "title": "ExprSurface",
+      "type": "object"
+    },
     "Label": {
       "additionalProperties": false,
       "properties": {
@@ -263,7 +380,7 @@
             "minimum": -1000,
             "type": "number"
           },
-          "maxItems": 2,
+          "maxItems": 3,
           "minItems": 2,
           "title": "Position",
           "type": "array"
@@ -287,9 +404,11 @@
           "discriminator": {
             "mapping": {
               "axes2d": "#/$defs/Axes",
+              "axes3d": "#/$defs/Axes3D",
               "expr_arrow": "#/$defs/ExprArrow",
               "expr_curve": "#/$defs/ExprCurve",
               "expr_point": "#/$defs/ExprPoint",
+              "expr_surface": "#/$defs/ExprSurface",
               "line_curve": "#/$defs/Curve",
               "slider": "#/$defs/Slider",
               "text_label": "#/$defs/Label",
@@ -300,6 +419,9 @@
           "oneOf": [
             {
               "$ref": "#/$defs/Axes"
+            },
+            {
+              "$ref": "#/$defs/Axes3D"
             },
             {
               "$ref": "#/$defs/Arrow"
@@ -321,6 +443,9 @@
             },
             {
               "$ref": "#/$defs/ExprPoint"
+            },
+            {
+              "$ref": "#/$defs/ExprSurface"
             }
           ],
           "title": "Content"
@@ -341,8 +466,11 @@
           "type": "boolean"
         },
         "coordinate_system": {
-          "const": "lesson_xy",
           "default": "lesson_xy",
+          "enum": [
+            "lesson_xy",
+            "lesson_xyz"
+          ],
           "title": "Coordinate System",
           "type": "string"
         }

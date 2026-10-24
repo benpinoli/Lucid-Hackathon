@@ -12,7 +12,7 @@ MAX_BYTES = 16_384
 MAX_OBJECTS = 30
 Id = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")]
 Number = Annotated[float, Field(ge=-1000, le=1000)]
-Point = Annotated[list[Number], Field(min_length=2, max_length=2)]
+Point = Annotated[list[Number], Field(min_length=2, max_length=3)]
 Text = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[^<>\x00-\x1f]*$")]
 
 
@@ -26,7 +26,7 @@ def _expression(value: str) -> str:
 
 # Safe arithmetic only (see expressions.py); renderers evaluate it with slider parameters.
 Expr = Annotated[str, Field(min_length=1, max_length=160), AfterValidator(_expression)]
-ExprPoint2 = Annotated[list[Expr], Field(min_length=2, max_length=2)]
+ExprPoint2 = Annotated[list[Expr], Field(min_length=2, max_length=3)]
 
 
 class StrictModel(BaseModel):
@@ -38,15 +38,33 @@ class Axes(StrictModel):
     extent: Annotated[float, Field(gt=0, le=100)] = 5.0
 
 
+class Axes3D(StrictModel):
+    primitive: Literal["axes3d"] = "axes3d"
+    extent: Annotated[float, Field(gt=0, le=6)] = 4.0
+    labels: Annotated[list[Text], Field(min_length=3, max_length=3)] = Field(default_factory=lambda: ["x", "y", "z"])
+
+
 class Arrow(StrictModel):
     primitive: Literal["vector_arrow"] = "vector_arrow"
     start: Point = Field(default_factory=lambda: [0.0, 0.0])
     end: Point
 
+    @model_validator(mode="after")
+    def dimensions(self):
+        if len(self.start) != len(self.end):
+            raise ValueError("Arrow endpoints must have matching dimensions")
+        return self
+
 
 class Curve(StrictModel):
     primitive: Literal["line_curve"] = "line_curve"
     points: Annotated[list[Point], Field(min_length=2, max_length=128)]
+
+    @model_validator(mode="after")
+    def dimensions(self):
+        if len({len(p) for p in self.points}) > 1:
+            raise ValueError("Curve points must have matching dimensions")
+        return self
 
 
 class Label(StrictModel):
@@ -60,6 +78,7 @@ class ExprCurve(StrictModel):
     primitive: Literal["expr_curve"] = "expr_curve"
     x: Expr
     y: Expr
+    z: Expr | None = None
     t_min: Number
     t_max: Number
     samples: Annotated[int, Field(ge=2, le=200)] = 96
@@ -75,6 +94,30 @@ class ExprArrow(StrictModel):
     primitive: Literal["expr_arrow"] = "expr_arrow"
     start: ExprPoint2 = Field(default_factory=lambda: ["0", "0"])
     end: ExprPoint2
+
+    @model_validator(mode="after")
+    def dimensions(self):
+        if len(self.start) != len(self.end):
+            raise ValueError("Arrow endpoints must have matching dimensions")
+        return self
+
+
+class ExprSurface(StrictModel):
+    primitive: Literal["expr_surface"] = "expr_surface"
+    x: Expr
+    y: Expr
+    z: Expr
+    u_min: Number
+    u_max: Number
+    v_min: Number
+    v_max: Number
+    samples: Annotated[int, Field(ge=8, le=40)] = 24
+
+    @model_validator(mode="after")
+    def domain(self):
+        if not self.u_min < self.u_max or not self.v_min < self.v_max:
+            raise ValueError("Surface parameter intervals must increase")
+        return self
 
 
 class ExprPoint(StrictModel):
@@ -101,7 +144,7 @@ class Slider(StrictModel):
         return self
 
 
-Primitive = Annotated[Axes | Arrow | Curve | Label | Slider | ExprCurve | ExprArrow | ExprPoint,
+Primitive = Annotated[Axes | Axes3D | Arrow | Curve | Label | Slider | ExprCurve | ExprArrow | ExprPoint | ExprSurface,
                       Field(discriminator="primitive")]
 
 
@@ -110,7 +153,7 @@ class Node(StrictModel):
     content: Primitive
     style: Literal["primary", "secondary", "muted"] = "primary"
     visible: bool = True
-    coordinate_system: Literal["lesson_xy"] = "lesson_xy"
+    coordinate_system: Literal["lesson_xy", "lesson_xyz"] = "lesson_xy"
 
 
 class Replace(StrictModel):

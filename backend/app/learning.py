@@ -400,8 +400,52 @@ def authored_dijkstra() -> LessonPlan:
     return dijkstra_lesson(positions=GRAPH_POSITIONS)
 
 
+def complex_quadratic_lesson(a=1.0, b=0.0, c=1.0) -> LessonPlan:
+    """A real 3D slice of a complex quadratic; both output components must vanish at roots."""
+    import cmath
+    from .diagrams import DBeat, DCurve, DPoint, DSurface, DiagramLesson, compile_lesson, diagram
+    if not all(isinstance(v, (float, int)) and abs(v) <= 10 for v in (a, b, c)) or abs(a) < 0.01:
+        raise LessonError("Use finite real coefficients up to 10 with nonzero a")
+    root = cmath.sqrt(b * b - 4 * a * c)
+    roots = [(-b + root) / (2 * a), (-b - root) / (2 * a)]
+    if any(abs(r.real) > 3 or abs(r.imag) > 3 for r in roots):
+        raise LessonError("Roots must fit within -3..3 on the complex plane")
+    def literal(value):
+        return f"{value:.12f}".rstrip("0").rstrip(".") or "0"
+    aa, bb, cc = map(literal, (a, b, c))
+    expression = f"({aa})*(u^2-v^2)+({bb})*u+({cc})"
+    center = -b / (2 * a)
+    radius = min(3.5, max(1.5, *(abs(r.imag) + 0.5 for r in roots)))
+    # Scale the output axis only, so large coefficients do not hide the surface.
+    scale = max(1.0, abs(a) * 8 + abs(b) * 2 + abs(c)) / 4
+    lesson = DiagramLesson(title=f"Complex roots: {a:g}z² + {b:g}z + {c:g}", diagram=diagram(
+        dimensions=3, axes=True,
+        surfaces=[DSurface(id="real_output", x="u", y="v", z=f"({expression})/({scale})",
+                          u_min=min(-2, *(r.real - 0.5 for r in roots)),
+                          u_max=max(2, *(r.real + 0.5 for r in roots)), v_min=-radius, v_max=radius, style="muted")],
+        curves=[DCurve(id="imaginary_slice", x=literal(center), y="t",
+                       z=f"(({aa})*(({literal(center)})^2-t^2)+({bb})*({literal(center)})+({cc}))/({literal(scale)})",
+                       t_min=-radius, t_max=radius, style="primary"),
+                DCurve(id="real_slice", x="t", y="0", z=f"(({aa})*t^2+({bb})*t+({cc}))/({literal(scale)})",
+                       t_min=-3.5, t_max=3.5, style="secondary")],
+        points=[DPoint(id=f"root_{i}", x=literal(r.real), y=literal(r.imag), z="0",
+                       text=f"z = {r.real:.3g} {r.imag:+.3g}i") for i, r in enumerate(roots)]),
+        beats=[DBeat(say="The first two axes are the real and imaginary parts of the input. "
+                         "The third axis shows the real part of the output, scaled to fit.", focus=["axes", "real_output"]),
+               DBeat(say="For a complex root, both the real and imaginary parts of the output must be zero. "
+                         "Zero on the real-output axis alone is not enough.", focus=["imaginary_slice"]),
+               DBeat(say=f"For this example the roots are {_num(roots[0].real)} plus {_num(roots[0].imag)} i "
+                         f"and {_num(roots[1].real)} plus {_num(roots[1].imag)} i. "
+                         "Rotate the model to inspect them on the complex plane.", focus=["root_0", "root_1"])])
+    result = compile_lesson(lesson, recipe_id="complex_quadratic_v1")
+    axes = next(n for n in result.nodes if n.id == "axes")
+    axes.content.labels = ["Re(input)", "Im(input)", "Re(output), scaled"]
+    return result
+
+
 # First match wins. "dijk" also catches common misspellings such as "dijktra".
 RECIPES = (
+    (("complex root", "complex quadratic", "quadratic's complex"), complex_quadratic_lesson),
     (("dot product", "projection", "vector"), vector_projection),
     (("dijk", "shortest path"), authored_dijkstra),
     (("mean value", "mvt"), mean_value_lesson),

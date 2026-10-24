@@ -201,6 +201,24 @@ See [frontend verification](../docs/FRONTEND.md) for results and remaining devic
 
 ## Files to extend
 
+The learning-day panel offers **Learn something new** and an optional **Review due topics**
+warm-up, backed by FSRS. Suggested topics show mastery separately from estimated recall and the
+next review date. **Active recall** asks before showing the explanation; **Skip** never awards
+mastery. Guided lessons pause at predictions and small steps; **Continue** cannot dismiss a
+pending question. AI synthesis and teach-back tasks require the backend lesson author.
+
+For a spatial example, explore `3D graph of a quadratic's complex roots`. The scene contains a
+sampled surface, three labeled axes and roots on the complex input plane. Drag to orbit, or
+choose **Move model** / **Rotate model** for transform handles. With **Whole model** unchecked,
+select a scene object to manipulate it separately. **Reset arrangement** restores placement.
+In VR, aim at the model and squeeze the grip to move and rotate it; release to place it.
+Supported hand tracking uses pinch. Trigger presses still operate slider buttons. Object
+placement is local and retained across steps/highlights; it resets for a different concept.
+
+`src/geometry.ts` handles bounded surface triangulation; `src/manipulation.ts` owns exclusive
+grabs and world-transform-preserving pickup/release. Automated tests verify their math, while
+physical headset/controller/hand-tracking behavior still needs a hardware acceptance run.
+
 | File | Responsibility |
 | --- | --- |
 | `src/protocol.ts` | Shared schema validation, immutable reducer, local projection recipe |

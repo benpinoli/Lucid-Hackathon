@@ -484,7 +484,7 @@ def test_claude_planner_builds_verified_lesson_from_parameters():
     assert request["model"] == "claude-opus-5-5" and request["fallbacks"] == "default"
     assert request["output_config"]["effort"] == "low"
     assert request["output_config"]["format"]["schema"]["properties"]["recipe"]["enum"] == [
-        "vector_projection", "dijkstra", "mean_value", "none"]
+        "vector_projection", "dijkstra", "mean_value", "complex_quadratic", "none"]
     assert request["messages"] == [{"role": "user", "content": "shortest path from S to T"}]
 
 
@@ -693,7 +693,7 @@ def test_goal_api_flow(tmp_path):
             assert "Functions → Slope and secant lines" in mapped["plan"]["beats"][1]["say_text"]
             ws.send_json({"type": "turn", "text": "Learn next", "expected_epoch": 1, "concept": route["next"]})
             taught = ws.receive_json()
-            assert taught["plan"]["concept_id"] == route["next"] and taught["plan"]["recipe_id"] == "concept_card_v1"
+            assert taught["plan"]["concept_id"] == route["next"] and taught["plan"]["recipe_id"] == "diagram_v1"
             ws.send_json({"type": "turn", "text": "explain dot product", "expected_epoch": 2})
             assert ws.receive_json()["plan"]["concept_id"] is not None  # free exploration counts too
 
@@ -770,7 +770,7 @@ def tutor_env(goals):
     human = graph.create_human()
 
     def make(author=None):
-        tutor = Tutor(graph, goals_, plan, author)
+        tutor = Tutor(graph, goals_, plan, author, active_learning=False)
         session = Session()
         return tutor, session, lambda action, text="": tutor.act(session, human.human_id, action, text)
     return graph, curriculum, human, make
@@ -866,6 +866,163 @@ def test_free_questions_keep_the_pending_check(tutor_env):
     answer = act("question", "what is a dot product?")
     assert session.question is pending and answer.beats[-1].say_text.startswith("Whenever you're ready")
     assert act("continue").beats[-1].say_text == pending.spoken
+
+
+def test_known_goal_and_requests_for_more_keep_teaching_without_regrading(tutor_env):
+    graph, curriculum, human, make = tutor_env
+    target = curriculum.ids["derivatives"]
+    human.add_concept(target, understanding=9, method="test")
+    tutor, session, act = make(FakeAuthor())
+    before = human.revision
+    first = act("goal", "derivatives")
+    assert first.tutor["mode"] == "checking" and first.concept_id == target
+    for action, text in [("answer", "I want to learn more"), ("review", ""), ("deeper", "")]:
+        result = act(action, text)
+        assert result.tutor["awaiting_answer"] and result.concept_id == target
+        assert human.revision == before
+    assert human.snapshot().nodes[target].understanding == 9
+
+
+def test_continue_after_completion_reopens_teaching(tutor_env):
+    _, curriculum, _, make = tutor_env
+    _, session, act = make()
+    act("goal", "derivatives")
+    act("answer", "2x")
+    assert session.mode == "done"
+    result = act("continue")
+    assert session.mode == "checking" and result.concept_id == curriculum.ids["derivatives"]
+    assert any(n.content.primitive == "expr_curve" for n in result.nodes)
+
+
+def test_new_generated_goal_can_be_assessed_and_routed(tutor_env):
+    graph, _, human, make = tutor_env
+    _, session, act = make(FakeAuthor())
+    act("goal", "teach me the chain rule")
+    taught = act("answer", "not sure")
+    while session.mode == "diagnosing":
+        taught = act("answer", "yes")
+    chain = graph.god.get_concept("Chain rule").id
+    for _ in range(16):
+        if session.current == chain:
+            break
+        taught = act("answer", session.question.expected)
+    assert taught.concept_id == chain and taught.generated
+    finished = act("answer", "yes")
+    assert finished.tutor["mode"] == "done"
+    assert human.snapshot().nodes[chain].understanding == 8
+
+
+class FactAuthor(FakeAuthor):
+    def concept(self, request, existing):
+        return ConceptSpec(name="Even functions", description="On a symmetric domain, f(-x) = f(x).",
+                           links=[ConceptLink(concept="Functions", similarity=8)])
+
+    def explain(self, concept, description, context, request=None):
+        self.context = context
+        written = super().explain(concept, description, context, request)
+        written.facts = [
+            ConceptSpec(name="Symmetry", description="A transformation preserves a figure or function.", links=[]),
+            ConceptSpec(name="Even functions", description="On a symmetric domain, f(-x) = f(x).",
+                        links=[ConceptLink(concept="Symmetry", similarity=8)]),
+            ConceptSpec(name="Odd functions", description="On a symmetric domain, f(-x) = -f(x).",
+                        links=[ConceptLink(concept="Symmetry", similarity=8)])]
+        return written
+
+
+def test_free_topic_and_atomic_facts_are_saved_deduplicated_and_reusable(tutor_env):
+    graph, curriculum, human, make = tutor_env
+    author = FactAuthor()
+    tutor, session, act = make(author)
+    act("goal", "derivatives")
+    pending = session.question
+    first = act("question", "Explain even functions")
+    even = graph.god.get_concept("Even functions").id
+    odd = graph.god.get_concept("Odd functions").id
+    symmetry = graph.god.get_concept("Symmetry").id
+    assert even != curriculum.ids["functions"] and first.concept_id == even
+    assert symmetry in graph.god.neighbors(even) and symmetry in graph.god.neighbors(odd)
+    assert session.question is pending  # a side question does not consume the check
+    assert author.context["current_concept"] == "Even functions"
+    assert even not in human.snapshot().nodes  # exposure cannot fabricate mastery
+    revision = graph.god.revision
+    act("question", "Explain EVEN FUNCTIONS")
+    assert graph.god.revision == revision  # no duplicate nodes or reassessed shared edges
+    assert tutor.library.listing(human.human_id) == [{"concept_id": even}]
+    other = graph.create_human()
+    assert tutor.library.get(other.human_id, even) is None
+    # A new tutor instance can reuse its saved geometry with the author unavailable.
+    offline, _, _ = make()
+    saved, check = offline._lesson(even, human.human_id, Session(target=even))
+    assert saved.nodes == first.nodes and check.expected_answer == "yes"
+
+
+def test_lesson_library_survives_database_reopen(tmp_path):
+    from backend.app.library import LessonLibrary
+    url = f"sqlite:///{tmp_path / 'lessons.db'}"
+    with MemoryGraph.open(url) as graph:
+        human = graph.create_human().human_id
+        concept = graph.god.add_concept("A topic").id
+        lesson = compile_lesson(AUTHORED["functions"])
+        LessonLibrary(graph).save(human, concept, lesson, Check(question="Why?", expected_answer="Because"))
+    with MemoryGraph.open(url) as graph:
+        saved, check = LessonLibrary(graph).get(human, concept)
+        assert saved.nodes == lesson.nodes and check.expected_answer == "Because"
+
+
+def test_exploration_can_go_deeper_and_review_with_provider_unavailable(tutor_env):
+    graph, _, human, make = tutor_env
+    tutor, session, act = make(FactAuthor())
+    explored = act("explore", "even functions")
+    assert session.current is None and session.viewed == explored.concept_id
+    deeper = act("deeper")
+    assert deeper.concept_id == explored.concept_id and deeper.tutor["awaiting_answer"]
+    tutor.author = None
+    reviewed = act("review")
+    assert reviewed.generated and reviewed.nodes == explored.nodes
+    assert graph.human(human.human_id).snapshot().nodes == {}
+
+
+def test_teaching_context_uses_traversal_cost_and_can_bridge_unassessed_nodes(goals):
+    graph, curriculum, goals_ = goals
+    human = graph.create_human()
+    for name in ("Relevant anchor", "Weak anchor", "Unrelated anchor", "Bridge", "Target"):
+        graph.god.add_concept(name)
+    ids = {name: graph.god.get_concept(name).id for name in
+           ("Relevant anchor", "Weak anchor", "Unrelated anchor", "Bridge", "Target")}
+    graph.god.connect(ids["Relevant anchor"], ids["Bridge"], similarity=10, provenance={"source": "test"})
+    graph.god.connect(ids["Bridge"], ids["Target"], similarity=10, provenance={"source": "test"})
+    graph.god.connect(ids["Weak anchor"], ids["Target"], similarity=1, provenance={"source": "test"})
+    for name in ("Relevant anchor", "Weak anchor", "Unrelated anchor"):
+        human.add_concept(ids[name], understanding=8, method="test")
+    before = human.revision
+    context = goals_.teaching_context(human.human_id, ids["Target"])
+    assert [n["name"] for n in context["teaching_sequence"]] == ["Relevant anchor", "Bridge", "Target"]
+    assert "Unrelated anchor" not in [n["name"] for n in context["nearest_concepts"]]
+    assert context["teaching_sequence"][-1]["understanding"] is None
+    assert human.revision == before
+    # Similarity and understanding are inputs; Dijkstra uses the derived traversal cost.
+    expected = graph.methodology.cost(10, 1, 1) + graph.methodology.cost(10, 1, 8)
+    assert context["teaching_sequence"][0]["distance_to_goal"] == pytest.approx(expected)
+
+
+def test_library_and_review_api_are_user_scoped(tmp_path):
+    graph = MemoryGraph.open(f"sqlite:///{tmp_path / 'review.db'}")
+    human, other = graph.create_human(), graph.create_human()
+    app = create_app(graph, {TOKEN: human.human_id, OTHER: other.human_id},
+                     voice=None, planner=None, author=FactAuthor())
+    with graph, TestClient(app) as client:
+        lesson = client.post("/api/lessons", headers=headers()).json()["lesson_id"]
+        path = f"/api/lessons/{lesson}/tutor"
+        first = client.post(path, headers=headers(), json={
+            "action": "explore", "text": "Explain even functions", "expected_epoch": 0})
+        assert first.status_code == 200
+        even = first.json()["plan"]["concept_id"]
+        listing = f"/api/users/{human.human_id}/lessons"
+        assert client.get(listing, headers=headers()).json() == [{"concept_id": even}]
+        assert client.get(listing, headers=headers(OTHER)).status_code == 403
+        reviewed = client.post(path, headers=headers(), json={
+            "action": "review", "text": "even functions", "expected_epoch": 1})
+        assert reviewed.status_code == 200 and reviewed.json()["plan"]["concept_id"] == even
 
 
 @pytest.mark.parametrize("change,message", [

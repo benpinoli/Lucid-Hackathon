@@ -1,7 +1,7 @@
 import type { Plan } from './protocol';
 
 export type RealtimeEvent = { type: string; [key: string]: unknown };
-const ACTIONS = ['goal', 'answer', 'confused', 'question', 'continue', 'explore'];
+const ACTIONS = ['goal', 'answer', 'confused', 'question', 'continue', 'explore', 'review', 'deeper', 'recall', 'warmup', 'skip'];
 type Hooks = {
   send: (event: object) => void;
   /** Sends the learner's words to the tutor; resolves with the reply (diagram + steps). */
@@ -48,7 +48,9 @@ export class VoiceNarrator {
   /** Tell the model about a lesson it did not request, so follow-up questions have context. */
   introduce(plan: Plan) {
     const steps = plan.beats.map((beat, i) => `${i + 1}. ${beat.say_text}`).join(' ');
-    this.hooks.send({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: `The learner is now viewing the ${plan.recipe_id} lesson. Its steps are: ${steps}` }] } });
+    const context = JSON.stringify({ goal: plan.tutor?.goal, awaiting_answer: !!plan.tutor?.awaiting_answer,
+      learning_context: plan.graph_context });
+    this.hooks.send({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: `The learner is now viewing the ${plan.recipe_id} lesson. Context: ${context}. Its steps are: ${steps}` }] } });
     this.narrate(plan);
   }
   /** Abandon the current script and cut any audio still playing. */
@@ -174,6 +176,8 @@ export class VoiceNarrator {
       this.hooks.status(action === 'confused' ? 'Finding another way to explain…' : 'Thinking…');
       plan = await this.hooks.tutor(action, text.trim());
       output = { steps: plan.beats.map(beat => beat.say_text), awaiting_answer: !!plan.tutor?.awaiting_answer,
+        exercise: plan.tutor?.exercise,
+        learning_context: plan.graph_context, goal: plan.tutor?.goal,
         note: 'The app now reads these steps aloud. Do not repeat them.' + (plan.tutor?.awaiting_answer
           ? ' A question is pending: when the learner replies, call tutor with action answer and their words.' : '') };
     } catch (error) { output = { error: error instanceof Error ? error.message : 'Lesson failed' }; }

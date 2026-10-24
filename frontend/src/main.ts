@@ -12,6 +12,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <p class="intro">Explore ideas in a space you can move through. Try the dot product, Dijkstra's algorithm, or the mean value theorem.</p>
       <form id="connection"><label for="token">Private backend token</label><input id="token" type="password" autocomplete="off" placeholder="Paste the demo token" required /><div class="row"><button id="connect">Connect</button><button id="disconnect" type="button" class="quiet" disabled>Disconnect</button></div><p class="hint">Held in memory for this session only.</p></form>
       <section class="tutor" aria-label="Tutor">
+        <section id="learning-day" hidden aria-label="Your learning day"><label>Your learning day</label><p class="hint">Learn something new, or start with a short retrieval warm-up.</p><div class="row wrap"><button id="learn-new" type="button" class="quiet">Learn something new</button><button id="warmup" type="button">Review due topics</button></div><p id="review-status" class="hint" role="status"></p><div id="review-topics"></div></section>
         <form id="goal"><label for="goal-text">What do you want to learn?</label><input id="goal-text" type="text" maxlength="500" placeholder="e.g. the mean value theorem" required /><div class="row"><button id="goal-start" disabled>Start learning</button></div></form>
         <form id="reply" hidden><label for="reply-text" id="reply-label">Your answer</label><input id="reply-text" type="text" maxlength="2000" autocomplete="off" /><div class="row wrap"><button id="reply-send">Answer</button><button id="confused" type="button" class="quiet">I'm confused</button><button id="continue" type="button" class="quiet">Continue</button></div><p class="hint">With voice on, just talk: answer, ask, or say what's unclear.</p></form>
       </section>
@@ -19,14 +20,15 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <section class="voice" aria-label="Voice tutor"><label>Voice tutor</label><div class="row"><button id="voice" type="button" class="quiet" disabled>Start voice</button><button id="mute" type="button" class="quiet" disabled aria-pressed="false">Mute mic</button></div><label class="check"><input id="barge-in" type="checkbox" /> Interrupt by talking (use headphones)</label><p class="hint">Otherwise the mic opens when the tutor finishes. To cut in, press Interrupt or pull the VR trigger.</p><p id="voice-status" class="hint" role="status">Connect first. Voice also needs OPENAI_API_KEY on the backend.</p></section>
       <div id="error" role="alert" hidden></div>
       <section class="lesson"><div class="eyebrow">GUIDED EXPLANATION</div><div id="beats"><p class="hint">Connect and explore a concept to begin.</p></div></section>
-      <p class="footnote">Authored lessons · Text or voice<br>Voice reads the authored steps aloud</p>
+      <p class="footnote">Active lessons · Text or voice<br>Predict, explain, connect, and recall</p>
     </aside>
     <section class="workspace" aria-label="Lesson workspace"><div class="toolbar"><div><span class="live-dot"></span><strong>Concept space</strong><span id="scene-meta">Awaiting lesson</span></div><div class="row"><button id="reset" class="quiet">Reset view</button><div id="xr"></div></div></div>
       <div id="viewport"><div id="empty"><span>01 / VECTOR LAB</span><h2>A new perspective<br>starts here.</h2><p>Connect your backend to bring the lesson into view.</p></div></div>
+      <div class="row wrap" aria-label="Scene manipulation"><label for="manipulation">Interaction</label><select id="manipulation"><option value="orbit">Orbit camera</option><option value="translate">Move model</option><option value="rotate">Rotate model</option></select><label class="check"><input id="whole-model" type="checkbox" checked /> Whole model</label><button id="reset-arrangement" type="button" class="quiet">Reset arrangement</button></div>
       <div class="scene-bottom"><div class="legend" id="legend"><span>● u / projection</span><span>● v</span></div><span>Drag to orbit · Scroll to zoom</span></div>
       <section id="sliders" aria-label="Local scene controls"></section>
       <div class="diagnostics"><span id="metrics">Renderer starting…</span><span>Scene schema v1</span></div>
-      <p class="xr-note">VR: connect and load a lesson first. Use Enter VR on a supported device. Point a controller at ± angle and press the trigger. Desktop controls remain available outside VR.</p>
+      <p class="xr-note">VR: point at the model and squeeze the grip to grab, move, and rotate it; release to place it. Hand-tracked pinch also grabs when supported. Whole model keeps the diagram together; uncheck it to move individual objects. Use the trigger for slider buttons. Desktop: choose Move or Rotate for handles, or Orbit to look around.</p>
     </section>
   </main>`;
 
@@ -38,6 +40,7 @@ try { renderer = new LessonRenderer(element('viewport'), element('xr'), text => 
 catch { error('WebGL is unavailable. Enable browser hardware acceleration and reload. Backend controls and lesson text are still usable.'); element('metrics').textContent = 'Renderer unavailable'; }
 let snapshot: Snapshot | undefined;
 let plan: Plan | undefined;
+let visualKey = '';
 const overrides = new Map<string, number>();
 function draw() {
   if (!snapshot) return;
@@ -152,13 +155,17 @@ const client = new LessonClient({
     element<HTMLButtonElement>('send').disabled = !ready; element<HTMLButtonElement>('interrupt').disabled = !ready;
   },
   state: value => {
+    if (!snapshot || value.scene_id !== snapshot.scene_id) { renderer?.beginScene(); visualKey = ''; }
     if (snapshot && (value.lesson_id !== snapshot.lesson_id || value.turn_epoch !== snapshot.turn_epoch)) showBeats();
     snapshot = value; overrides.clear(); element('empty').hidden = value.nodes.length > 0;
     element('scene-meta').textContent = `Epoch ${value.turn_epoch} · revision ${value.scene_revision} · ${value.nodes.length} objects`;
     draw(); renderSliders();
   },
   plan: value => {
+    const key = value.concept_id ?? value.recipe_id;
+    if (key !== visualKey) { renderer?.beginScene(); draw(); visualKey = key; }
     showBeats(value); renderSliders(); showTutor(value);
+    void refreshReviews();
     if (pendingVoiceTurn) { pendingVoiceTurn.resolve(value); pendingVoiceTurn = undefined; }
     else if (voice) narrator.introduce(value);
   },
@@ -172,6 +179,7 @@ element('connection').addEventListener('submit', async event => {
   try {
     await client.connect(element<HTMLInputElement>('token').value); element<HTMLInputElement>('token').value = ''; element<HTMLButtonElement>('disconnect').disabled = false;
     element<HTMLButtonElement>('goal-start').disabled = false;
+    element('learning-day').hidden = false; void refreshReviews();
     voiceStatus(client.voiceAvailable ? 'Voice is available. Start voice, then ask about a topic out loud.' : 'Voice is off: the backend has no OPENAI_API_KEY. Text lessons work normally.');
     updateVoiceControls();
   }
@@ -183,7 +191,7 @@ element('disconnect').onclick = async () => {
   element<HTMLButtonElement>('goal-start').disabled = true; element('reply').hidden = true; tutorState = null;
   element('sliders').replaceChildren(); element('empty').hidden = false; element('scene-meta').textContent = 'Awaiting lesson'; element<HTMLButtonElement>('disconnect').disabled = true;
 };
-element('turn').addEventListener('submit', event => { event.preventDefault(); clearError(); try { client.command('turn', element<HTMLTextAreaElement>('question').value); } catch (e) { error((e as Error).message); } });
+element('turn').addEventListener('submit', event => { event.preventDefault(); tutor('explore', element<HTMLTextAreaElement>('question').value); });
 // ---- tutor: the learner talks or types; the route and scores stay on the server ----
 let tutorState: TutorState | null = null;
 function tutor(action: string, text = '') {
@@ -193,9 +201,11 @@ function tutor(action: string, text = '') {
 function showTutor(value: Plan) {
   if (!value.tutor) return;
   tutorState = value.tutor;
+  element('reply').dataset.exercise = value.tutor.exercise ?? '';
   const awaiting = value.tutor.awaiting_answer;
   element('reply').hidden = false;
   element('reply-label').textContent = awaiting ? 'Your answer' : 'Ask the tutor anything';
+  if (value.tutor.exercise && value.tutor.exercise !== 'check' && value.tutor.exercise !== 'diagnostic') element('reply-label').textContent = `Your answer · ${value.tutor.exercise.startsWith('prediction') ? 'Predict and explain' : value.tutor.exercise === 'synthesis' ? 'Connect the ideas' : value.tutor.exercise === 'teachback' ? 'Teach it back' : 'Recall from memory'}`;
   element('reply-send').textContent = awaiting ? 'Answer' : 'Ask';
 }
 element('goal').addEventListener('submit', event => { event.preventDefault(); tutor('goal', element<HTMLInputElement>('goal-text').value); });
@@ -207,6 +217,41 @@ element('reply').addEventListener('submit', event => {
 });
 element('confused').onclick = () => { const input = element<HTMLInputElement>('reply-text'); tutor('confused', input.value || "I don't understand this part."); input.value = ''; };
 element('continue').onclick = () => tutor('continue');
+for (const action of ['review', 'deeper', 'recall', 'skip']) {
+  const button = document.createElement('button');
+  button.type = 'button'; button.className = 'quiet';
+  button.textContent = ({ review: 'Review', deeper: 'Go deeper', recall: 'Active recall', skip: 'Skip' } as Record<string, string>)[action];
+  button.onclick = () => { const input = element<HTMLInputElement>('reply-text'); tutor(action, input.value); input.value = ''; };
+  element('continue').parentElement!.append(button);
+}
+const askButton = document.createElement('button');
+askButton.type = 'button'; askButton.className = 'quiet'; askButton.textContent = 'Ask a question';
+askButton.onclick = () => { const input = element<HTMLInputElement>('reply-text'); if (input.value.trim()) tutor('question', input.value); input.value = ''; };
+element('continue').parentElement!.append(askButton);
+
+type ReviewTopic = { concept_id: string; name: string; mastery: number; due: boolean; next_review: string; recall_probability: number | null };
+let reviewRequest = 0;
+async function refreshReviews() {
+  const request = ++reviewRequest;
+  try {
+    const due = await client.api<{ due_count: number; topics: ReviewTopic[] }>('GET', '/api/me/reviews');
+    if (request !== reviewRequest || !sessionOpen) return;
+    element('review-status').textContent = due.due_count ? `${due.due_count} topics ready for retrieval. Warm-ups cover up to five topics.` : 'No reviews due. You can learn something new or practice recall anyway.';
+    element('review-topics').replaceChildren(...due.topics.slice(0, 5).map(topic => {
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'quiet review-topic';
+      const recall = topic.recall_probability === null ? 'Recall not estimated yet' : `Estimated recall ${Math.round(topic.recall_probability * 100)}%`;
+      button.textContent = `${topic.name} · mastery ${topic.mastery}/10 · ${recall} · ${topic.due ? 'Due now' : `Review ${new Date(topic.next_review).toLocaleDateString()}`}`;
+      button.onclick = () => tutor('recall', topic.concept_id); return button;
+    }));
+  } catch { if (request === reviewRequest) element('review-status').textContent = 'Review suggestions are unavailable. You can still choose a topic.'; }
+}
+element('warmup').onclick = () => tutor('warmup');
+element('learn-new').onclick = () => element<HTMLInputElement>('goal-text').focus();
+const manipulation = element<HTMLSelectElement>('manipulation');
+const wholeModel = element<HTMLInputElement>('whole-model');
+const updateManipulation = () => renderer?.setManipulation(manipulation.value as 'orbit' | 'translate' | 'rotate', wholeModel.checked);
+manipulation.onchange = updateManipulation; wholeModel.onchange = updateManipulation;
+element('reset-arrangement').onclick = () => renderer?.resetArrangement();
 element('voice').onclick = async () => {
   if (voice) { stopVoice(); return; }
   clearError(); element<HTMLButtonElement>('voice').disabled = true; voiceStatus('Connecting voice… allow microphone access if asked.');
@@ -217,6 +262,7 @@ element('voice').onclick = async () => {
     });
     voice = connection; muted = false; applyMic();
     voiceStatus('Listening… try “explain Dijkstra’s algorithm”.');
+    if (plan) narrator.introduce(plan);
   } catch (e) { voiceStatus(e instanceof Error ? e.message : 'Voice failed to start.'); }
   finally { updateVoiceControls(); }
 };

@@ -62,7 +62,7 @@ class Progress(StrictModel):
 
 class TutorAction(StrictModel):
     type: Literal["tutor"] = "tutor"
-    action: Literal["goal", "answer", "confused", "question", "continue", "explore"]
+    action: Literal["goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup", "skip"]
     text: Annotated[str, Field(max_length=2000)] = ""
     expected_epoch: Annotated[int, Field(ge=0)]
 
@@ -203,9 +203,18 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
     def me(user=Depends(identity)):
         return {"user_id": user, "revision": app.state.graph.human(user).revision}
 
+    @app.get("/api/me/reviews")
+    def reviews(user=Depends(identity)):
+        return app.state.service.tutor.reviews.suggestions(user)
+
     @app.get("/api/curriculum")
     def curriculum(user=Depends(identity)):
         return app.state.curriculum.listing()
+
+    @app.get("/api/users/{user_id}/lessons")
+    def lesson_library(user_id: str, user=Depends(identity)):
+        scoped(user, user_id)
+        return app.state.service.tutor.library.listing(user)
 
     @app.post("/api/users/{user_id}/goals")
     def goal(user_id: str, body: GoalRequest, user=Depends(identity)):
