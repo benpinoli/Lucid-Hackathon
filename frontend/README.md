@@ -35,11 +35,43 @@ npm run dev
 
 Open **http://localhost:5173** (use `localhost`, which the backend allows by default).
 Paste the printed token, select **Connect**, then **Explore concept**.
-The default question produces the authored dot-product scene. Drag to orbit,
+The default question produces the authored dot-product scene. Ask about Dijkstra's algorithm
+or the mean value theorem for the other two authored lessons (these have no local sliders). Drag to orbit,
 scroll to zoom, select explanation beats to highlight objects, and adjust the angle
 slider locally. **Reset view** restores the camera; a new turn resets local sliders.
 **Interrupt** advances the server epoch and retains the objects. **Disconnect**
 closes the socket and deletes the lesson to release capacity.
+
+**Tutor.** After connecting, say (with voice on) or type what you want to learn and select
+**Start learning**. The tutor asks a few quick questions, then teaches one concept at a time along
+the cheapest route through your knowledge graph, without showing the route. Every explanation has
+a diagram; move its sliders to explore. Answer the check question at the end of each lesson, or
+select **I'm confused** (or just say so) for a deeper explanation. **Continue** repeats a pending
+question. Your graph persists, so returning learners skip what they already know. With
+`ANTHROPIC_API_KEY` set, Claude writes new explanations, grades free-form answers and adds missing
+concepts; those scenes carry a small "AI-generated" marker.
+
+**Claude lesson planner (optional).** Export `ANTHROPIC_API_KEY` in the backend terminal too.
+Then requests such as "Dijkstra from S to T on my graph: S–X 2, X–T 3, S–T 9" or "mean value
+theorem for x³ − 3x on [−2, 2]" get a matching example. Claude only chooses parameters; LUCID
+computes and checks every number, and the explanation panel notes when Claude chose the example.
+Without the key, the authored default examples are used.
+
+**Voice turn-taking.** Each tutor reply is spoken as one continuous response (no gaps between
+steps); diagram highlights follow the playback clock and self-calibrate to the voice's pace. The
+microphone closes while the tutor speaks and reopens shortly after, so echo or noise cannot cut a
+question off. Turn detection waits for a finished thought (`LUCID_VOICE_EAGERNESS`, default `low`;
+`LUCID_VOICE_NOISE_REDUCTION`, default `near_field`, or `far_field`/`off`). To cut in, press
+**Interrupt** or pull the VR trigger away from the slider buttons; with headphones you can enable
+**Interrupt by talking**.
+
+**Voice tutor (optional).** Export `OPENAI_API_KEY` in the backend terminal before starting it
+(optionally `LUCID_VOICE_MODEL`, default `gpt-realtime-2.1`, and `LUCID_VOICE_NAME`, default `marin`).
+After connecting, select **Start voice**, allow the microphone, and ask for a topic out loud. The tutor
+shows the lesson, then reads each authored step aloud, highlighting it as its audio starts. Speak to
+interrupt; select a step to hear just that step. The key stays on the backend: the browser receives
+only a 10-minute credential and talks to OpenAI directly over WebRTC. A headset needs HTTPS for the
+microphone. Without a key, voice is disabled and everything else works.
 
 Keep both terminals running. Ctrl+C stops each service. Lessons expire when the backend
 process stops, while graph data in the demo database persists. Reconnect creates a

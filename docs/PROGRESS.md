@@ -79,7 +79,8 @@ benchmark and compare actual results with LUCID targets without changing formula
 Status: PARTIAL (backend text slice working; visual gate pending).
 Files implemented: `backend/app/main.py`, `learning.py`, `service.py`,
 `shared/schemas/learning-plan.v1.schema.json`, manifests, tests and standalone demo seed.
-Text input produces a validated authored dot-product scene and three semantic teaching beats.
+Text input produces validated authored scenes with semantic teaching beats: dot product,
+Dijkstra's algorithm ("dijkstra"/"shortest path") and the mean value theorem ("mean value"/"mvt").
 Unknown topics receive a safe whiteboard fallback. Optional graph context uses explicit stable IDs.
 Auth is token-to-provisioned-human mapping; lessons have scoped ownership. WS verifies Origin and
 first-message credential; no token is put into the URL. Reconnect returns compact state. Interrupt
@@ -97,8 +98,40 @@ then implement cancellable beat scheduling and audio playout acknowledgments.
 
 ## Later phases
 
-Phase 4 voice: not implemented; usable deterministic text fallback is available without API keys.
-Phase 5: vector projection has golden numeric checks; wave packet/barrier recipes remain pending.
+Phase 4 voice: PARTIAL. OpenAI Realtime over WebRTC with a backend-minted ephemeral credential
+(`POST /api/voice/sessions`; `OPENAI_API_KEY`, `LUCID_VOICE_MODEL`, `LUCID_VOICE_NAME`). The model's
+only tool is `show_lesson`; the client reads authored beats one response at a time and highlights each
+beat on `output_audio_buffer.started` (playback-confirmed cue). Barge-in drops queued beats.
+Unit-tested with recorded provider events; NOT yet verified against the live provider or on a headset.
+Pending: push-to-talk, transcript display, audio/visual skew metrics. Text mode is unchanged without a key.
+Voice turn-taking fix (first live test was choppy and cut questions/answers short): one
+continuous response per tutor reply instead of one per beat; playback-clock highlights with
+self-calibrating rate; mic gated while any tutor audio plays (echo ignored), opt-in voice barge-in,
+VR trigger/Interrupt button to cut in; semantic VAD eagerness low; near-field noise reduction;
+explicit echo cancellation. Unit-tested with recorded event sequences; needs a second live test.
+Conversational tutor (dynamic VR flow): voice/typed actions goal, answer, confused, question,
+continue, explore. Frontier-search starting check, silent baseline-Dijkstra route, diagram for every
+explanation (authored diagram lessons for all non-recipe curriculum topics; Claude diagram lessons
+otherwise), graded spoken checks as the only score source, confusion -> deeper explanation or
+prerequisite detour, Claude-created concepts written to the shared graph via accepted proposals.
+New scene primitives expr_curve/expr_arrow/expr_point with param sliders; safe expression language
+in Python and TypeScript with shared parity fixtures. Tested without a provider end to end and with
+the Claude author through a mocked transport. NOT yet run against live Claude or OpenAI, nor on a
+headset. Pending: XR-native answer input other than voice, transcript display, spaced review.
+Phase 6 learning goals: goal text -> curriculum concept (aliases, Claude fallback); diagnostic
+quiz -> Human Brain assessments; route = engine baseline Dijkstra from known concepts (>= 7) or
+cluster foundations; route map scene; per-step lessons; self-ratings update understanding and edge
+familiarity and recompute the route. Curriculum synced into the God Brain at startup. Tested in
+pytest (routes, costs, idempotent sync, atomic/stale writes, prerequisite guard) and a Playwright
+goal flow. Pending: God Brain expansion for topics outside the curriculum (Claude proposals via
+the engine's proposal API), voice-driven goals, spaced review.
+Phase 6 (partial, Level 1 planner): Claude selects recipe + typed parameters via structured output
+(`backend/app/planner.py`); builders compute geometry, numbers and narration, validate view/scene
+budgets, and Dijkstra beats come from the algorithm trace; MVT points are solved exactly (property
+tested). One corrective retry, then keyword fallback. Tested through the real SDK with a mocked
+transport; NOT yet run against the live API. Pending: show a placeholder scene while planning
+(Stage 0), graph-aware bridge selection, free-form sketches for topics without a recipe.
+Phase 5: vector projection, Dijkstra (cross-checked by Bellman-Ford) and mean value point have golden numeric checks; wave packet/barrier recipes remain pending.
 Phase 6: explicit user-scoped graph context and assessment loop exist; automated bridge selection pending.
 Phase 7: physical headset, thermal, network failure and renderer measurements remain unmeasured.
 Phase 8: outside the initial backend slice. No MVP completion claim is made.

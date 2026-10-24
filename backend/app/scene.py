@@ -4,13 +4,29 @@ from __future__ import annotations
 from collections import OrderedDict
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+
+from .expressions import ExpressionError, parse as parse_expression
 
 MAX_BYTES = 16_384
 MAX_OBJECTS = 30
 Id = Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,80}$")]
 Number = Annotated[float, Field(ge=-1000, le=1000)]
 Point = Annotated[list[Number], Field(min_length=2, max_length=2)]
+Text = Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[^<>\x00-\x1f]*$")]
+
+
+def _expression(value: str) -> str:
+    try:
+        parse_expression(value)
+    except ExpressionError as exc:
+        raise ValueError(f"Invalid expression: {exc}") from exc
+    return value
+
+
+# Safe arithmetic only (see expressions.py); renderers evaluate it with slider parameters.
+Expr = Annotated[str, Field(min_length=1, max_length=160), AfterValidator(_expression)]
+ExprPoint2 = Annotated[list[Expr], Field(min_length=2, max_length=2)]
 
 
 class StrictModel(BaseModel):
@@ -35,13 +51,43 @@ class Curve(StrictModel):
 
 class Label(StrictModel):
     primitive: Literal["text_label"] = "text_label"
-    text: Annotated[str, Field(min_length=1, max_length=256, pattern=r"^[^<>\x00-\x1f]*$")]
+    text: Text
     position: Point = Field(default_factory=lambda: [0.0, 0.0])
+
+
+class ExprCurve(StrictModel):
+    """Parametric curve (x(t), y(t)); other variables are param sliders."""
+    primitive: Literal["expr_curve"] = "expr_curve"
+    x: Expr
+    y: Expr
+    t_min: Number
+    t_max: Number
+    samples: Annotated[int, Field(ge=2, le=200)] = 96
+
+    @model_validator(mode="after")
+    def domain(self):
+        if not self.t_min < self.t_max:
+            raise ValueError("t_min must be below t_max")
+        return self
+
+
+class ExprArrow(StrictModel):
+    primitive: Literal["expr_arrow"] = "expr_arrow"
+    start: ExprPoint2 = Field(default_factory=lambda: ["0", "0"])
+    end: ExprPoint2
+
+
+class ExprPoint(StrictModel):
+    primitive: Literal["expr_point"] = "expr_point"
+    at: ExprPoint2
+    text: Text | None = None
 
 
 class Slider(StrictModel):
     primitive: Literal["slider"] = "slider"
-    binding: Literal["projection.angle", "projection.length"]
+    # Authored projection bindings, or a diagram parameter (single letter; e and t are reserved).
+    binding: Literal["projection.angle", "projection.length"] | Annotated[str, Field(pattern=r"^param\.[a-df-su-z]$")]
+    label: Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[^<>\x00-\x1f]*$")] | None = None
     minimum: Number
     maximum: Number
     value: Number
@@ -55,7 +101,8 @@ class Slider(StrictModel):
         return self
 
 
-Primitive = Annotated[Axes | Arrow | Curve | Label | Slider, Field(discriminator="primitive")]
+Primitive = Annotated[Axes | Arrow | Curve | Label | Slider | ExprCurve | ExprArrow | ExprPoint,
+                      Field(discriminator="primitive")]
 
 
 class Node(StrictModel):

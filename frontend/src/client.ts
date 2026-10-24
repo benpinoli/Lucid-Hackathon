@@ -1,4 +1,9 @@
 import { applyEvents, parsePlan, parseSnapshot, type Plan, type Snapshot } from './protocol';
+import type { Credential } from './voice';
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
 
 type Hooks = {
   state: (state: Snapshot) => void; plan: (plan: Plan) => void;
@@ -17,12 +22,22 @@ export class LessonClient {
   private busy = false;
   private awaiting: 'turn' | 'snapshot' | undefined;
   private generation = 0;
+  /** Backend has a realtime voice provider configured. */
+  voiceAvailable = false;
   constructor(private hooks: Hooks) {}
 
-  private async request(path: string, method: string) {
-    const response = await fetch(path, { method, headers: { Authorization: `Bearer ${this.token}` }, signal: AbortSignal.timeout(10000), cache: 'no-store' });
-    if (!response.ok) throw new Error(`Backend returned ${response.status}. ${response.status === 401 ? 'Check the private token.' : 'Check backend logs and setup.'}`);
-    return response.status === 204 ? undefined : response.json();
+  /** Authenticated JSON call; errors carry the status and the backend's detail when it sends one. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async api<T = any>(method: string, path: string, body?: object): Promise<T> {
+    const response = await fetch(path, {
+      method, cache: 'no-store', signal: AbortSignal.timeout(30000), body: body ? JSON.stringify(body) : undefined,
+      headers: { Authorization: `Bearer ${this.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+    });
+    if (!response.ok) {
+      const detail = await response.json().then(data => typeof data?.detail === 'string' ? ` ${data.detail}` : '', () => '');
+      throw new ApiError(`Backend returned ${response.status}.${detail || (response.status === 401 ? ' Check the private token.' : ' Check backend logs and setup.')}`, response.status);
+    }
+    return response.status === 204 ? undefined as T : response.json();
   }
   async connect(token: string) {
     if (!token.trim()) throw new Error('Enter the private demo token.');
@@ -31,9 +46,10 @@ export class LessonClient {
     this.token = token.trim(); this.stopped = false;
     this.hooks.status('Creating lesson…', false);
     try {
-      const health = await this.request('/api/health', 'GET');
+      const health = await this.api('GET', '/api/health');
       if (health.scene_schema_version !== 1) throw new Error('Backend scene version is unsupported.');
-      const created = parseSnapshot(await this.request('/api/lessons', 'POST'));
+      this.voiceAvailable = health.voice === 'realtime';
+      const created = parseSnapshot(await this.api('POST', '/api/lessons'));
       if (generation !== this.generation) return;
       this.state = created;
       this.hooks.state(created); this.open();
@@ -41,6 +57,13 @@ export class LessonClient {
       if (generation === this.generation) { this.stopped = true; this.hooks.status('Disconnected', false); this.token = ''; }
       throw error;
     }
+  }
+  /** Short-lived provider credential; the private backend token never leaves this client. */
+  async voiceCredential(): Promise<Credential> {
+    if (this.stopped) throw new Error('Connect before starting voice.');
+    const credential = await this.api('POST', '/api/voice/sessions');
+    if (typeof credential?.client_secret !== 'string' || !/^https:\/\//.test(credential?.sdp_url)) throw new Error('Backend returned an invalid voice credential.');
+    return credential;
   }
   private send(data: object) {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('Connection is not ready.');
@@ -119,12 +142,15 @@ export class LessonClient {
     clearTimeout(this.deadline);
     this.deadline = setTimeout(() => this.socket?.close(), 10000);
   }
-  command(type: 'turn' | 'interrupt', text?: string) {
+  /** `goal` turns teach a route step (concept) or show the route map (route_to). */
+  command(type: 'turn' | 'interrupt' | 'tutor', text?: string, extra?: { concept?: string; route_to?: string; action?: string }) {
     if (!this.state || this.busy || this.stopped) throw new Error('Wait for the current command or reconnect.');
     if (type === 'turn' && (!text?.trim() || text.length > 2000)) throw new Error('Enter between 1 and 2,000 characters.');
-    this.send({ type, expected_epoch: this.state.turn_epoch, ...(type === 'turn' ? { text: text!.trim() } : {}) });
-    this.busy = true; this.awaiting = type === 'turn' ? 'turn' : 'snapshot'; this.hooks.status(type === 'turn' ? 'Building explanation…' : 'Interrupting…', false);
-    this.deadline = setTimeout(() => { this.hooks.error('Response timed out. Restoring snapshot; the command will not be replayed.'); this.socket?.close(); }, 15000);
+    if (type === 'tutor' && (text ?? '').length > 2000) throw new Error('Keep it under 2,000 characters.');
+    this.send({ type, expected_epoch: this.state.turn_epoch, ...(type === 'interrupt' ? {} : { text: (text ?? '').trim(), ...extra }) });
+    this.busy = true; this.awaiting = type === 'interrupt' ? 'snapshot' : 'turn'; this.hooks.status(type === 'interrupt' ? 'Interrupting…' : 'Thinking…', false);
+    // Covers a planner model call plus one corrective retry on the backend.
+    this.deadline = setTimeout(() => { this.hooks.error('Response timed out. Restoring snapshot; the command will not be replayed.'); this.socket?.close(); }, 30000);
   }
   async disconnect() {
     ++this.generation; this.stopped = true;
@@ -132,7 +158,7 @@ export class LessonClient {
     this.socket?.close(); this.socket = undefined;
     const previous = this.state; this.state = undefined;
     if (previous && this.token) {
-      try { await this.request(`/api/lessons/${previous.lesson_id}`, 'DELETE'); }
+      try { await this.api('DELETE', `/api/lessons/${previous.lesson_id}`); }
       catch { this.hooks.error('Could not release the previous lesson. Restart the local backend if capacity is exhausted.'); }
     }
     this.token = ''; this.busy = false; this.awaiting = undefined; this.hooks.status('Disconnected', false);

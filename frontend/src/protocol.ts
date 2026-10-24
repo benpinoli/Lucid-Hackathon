@@ -8,7 +8,10 @@ export type Content =
   | { primitive: 'vector_arrow'; start: Point; end: Point }
   | { primitive: 'line_curve'; points: Point[] }
   | { primitive: 'text_label'; text: string; position: Point }
-  | { primitive: 'slider'; binding: 'projection.angle' | 'projection.length'; minimum: number; maximum: number; value: number };
+  | { primitive: 'slider'; binding: string; label?: string | null; minimum: number; maximum: number; value: number }
+  | { primitive: 'expr_curve'; x: string; y: string; t_min: number; t_max: number; samples: number }
+  | { primitive: 'expr_arrow'; start: [string, string]; end: [string, string] }
+  | { primitive: 'expr_point'; at: [string, string]; text: string | null };
 export interface SceneNode { id: string; content: Content; style: 'primary' | 'secondary' | 'muted'; visible: boolean; coordinate_system: 'lesson_xy' }
 export interface Snapshot {
   schema_version: 1; lesson_id: string; scene_id: string; turn_epoch: number;
@@ -19,7 +22,8 @@ export interface SceneEvent {
   schema_version: 1; event_id: string; lesson_id: string; scene_id: string;
   turn_epoch: number; seq: number; base_revision: number; operation: Operation;
 }
-export interface Plan { recipe_id: string; beats: { beat_id: string; say_text: string; focus_ids: string[] }[] }
+export interface TutorState { mode: string; awaiting_answer: boolean; goal: string | null }
+export interface Plan { recipe_id: string; planned_by?: string; concept_id?: string | null; generated?: boolean; tutor?: TutorState | null; beats: { beat_id: string; say_text: string; focus_ids: string[] }[] }
 const ajv = new Ajv2020({ strict: false, allErrors: false });
 const validateEvent = ajv.compile<SceneEvent>(eventSchema);
 const validatePlan = ajv.compile<Plan>(planSchema);
@@ -38,7 +42,7 @@ const validateSnapshot = ajv.compile<Snapshot>({
 function checkNodes(nodes: SceneNode[]) {
   if (nodes.length > 30 || new Set(nodes.map(n => n.id)).size !== nodes.length) throw new Error('Invalid scene object budget or duplicate ID');
   for (const { content: c } of nodes) {
-    if (!['axes2d', 'vector_arrow', 'line_curve', 'text_label', 'slider'].includes(c.primitive)) throw new Error('Explicit primitive discriminator required');
+    if (!['axes2d', 'vector_arrow', 'line_curve', 'text_label', 'slider', 'expr_curve', 'expr_arrow', 'expr_point'].includes(c.primitive)) throw new Error('Explicit primitive discriminator required');
     if (c.primitive === 'slider' && (!(c.minimum < c.maximum) || c.value < c.minimum || c.value > c.maximum || (c.binding === 'projection.length' && c.minimum < 0))) {
       throw new Error('Invalid local slider domain');
     }
@@ -51,6 +55,9 @@ function materializeNodes(nodes: SceneNode[]): SceneNode[] {
     if (content.primitive === 'axes2d') content = { ...content, extent: content.extent ?? 5 };
     if (content.primitive === 'vector_arrow') content = { ...content, start: content.start ?? [0, 0] };
     if (content.primitive === 'text_label') content = { ...content, position: content.position ?? [0, 0] };
+    if (content.primitive === 'expr_curve') content = { ...content, samples: content.samples ?? 96 };
+    if (content.primitive === 'expr_arrow') content = { ...content, start: content.start ?? ['0', '0'] };
+    if (content.primitive === 'expr_point') content = { ...content, text: content.text ?? null };
     return { ...node, style: node.style ?? 'primary', visible: node.visible ?? true, coordinate_system: node.coordinate_system ?? 'lesson_xy', content };
   });
 }

@@ -110,6 +110,137 @@
       "title": "Curve",
       "type": "object"
     },
+    "ExprArrow": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "expr_arrow",
+          "default": "expr_arrow",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "start": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Start",
+          "type": "array"
+        },
+        "end": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "End",
+          "type": "array"
+        }
+      },
+      "required": [
+        "end"
+      ],
+      "title": "ExprArrow",
+      "type": "object"
+    },
+    "ExprCurve": {
+      "additionalProperties": false,
+      "description": "Parametric curve (x(t), y(t)); other variables are param sliders.",
+      "properties": {
+        "primitive": {
+          "const": "expr_curve",
+          "default": "expr_curve",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "x": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "X",
+          "type": "string"
+        },
+        "y": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Y",
+          "type": "string"
+        },
+        "t_min": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "T Min",
+          "type": "number"
+        },
+        "t_max": {
+          "maximum": 1000,
+          "minimum": -1000,
+          "title": "T Max",
+          "type": "number"
+        },
+        "samples": {
+          "default": 96,
+          "maximum": 200,
+          "minimum": 2,
+          "title": "Samples",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "t_min",
+        "t_max"
+      ],
+      "title": "ExprCurve",
+      "type": "object"
+    },
+    "ExprPoint": {
+      "additionalProperties": false,
+      "properties": {
+        "primitive": {
+          "const": "expr_point",
+          "default": "expr_point",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "at": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "At",
+          "type": "array"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "pattern": "^[^<>\\x00-\\x1f]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "title": "ExprPoint",
+      "type": "object"
+    },
     "Label": {
       "additionalProperties": false,
       "properties": {
@@ -156,6 +287,9 @@
           "discriminator": {
             "mapping": {
               "axes2d": "#/$defs/Axes",
+              "expr_arrow": "#/$defs/ExprArrow",
+              "expr_curve": "#/$defs/ExprCurve",
+              "expr_point": "#/$defs/ExprPoint",
               "line_curve": "#/$defs/Curve",
               "slider": "#/$defs/Slider",
               "text_label": "#/$defs/Label",
@@ -178,6 +312,15 @@
             },
             {
               "$ref": "#/$defs/Slider"
+            },
+            {
+              "$ref": "#/$defs/ExprCurve"
+            },
+            {
+              "$ref": "#/$defs/ExprArrow"
+            },
+            {
+              "$ref": "#/$defs/ExprPoint"
             }
           ],
           "title": "Content"
@@ -286,12 +429,35 @@
           "type": "string"
         },
         "binding": {
-          "enum": [
-            "projection.angle",
-            "projection.length"
+          "anyOf": [
+            {
+              "enum": [
+                "projection.angle",
+                "projection.length"
+              ],
+              "type": "string"
+            },
+            {
+              "pattern": "^param\\.[a-df-su-z]$",
+              "type": "string"
+            }
           ],
-          "title": "Binding",
-          "type": "string"
+          "title": "Binding"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "minLength": 1,
+              "pattern": "^[^<>\\x00-\\x1f]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
         },
         "minimum": {
           "maximum": 1000,

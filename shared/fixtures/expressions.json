@@ -1,0 +1,179 @@
+{
+ "valid": [
+  {
+   "source": "1 + 2 * 3",
+   "scope": {},
+   "value": 7.0
+  },
+  {
+   "source": "(1 + 2) * 3",
+   "scope": {},
+   "value": 9.0
+  },
+  {
+   "source": "2 ^ 3 ^ 2",
+   "scope": {},
+   "value": 512.0
+  },
+  {
+   "source": "-x^2",
+   "scope": {
+    "x": 3
+   },
+   "value": -9.0
+  },
+  {
+   "source": "2^-1",
+   "scope": {},
+   "value": 0.5
+  },
+  {
+   "source": "0.25*t^3 - t",
+   "scope": {
+    "t": 1.5
+   },
+   "value": -0.65625
+  },
+  {
+   "source": "sin(pi/6)",
+   "scope": {},
+   "value": 0.49999999999999994
+  },
+  {
+   "source": "cos(a*pi/180)",
+   "scope": {
+    "a": 60
+   },
+   "value": 0.5000000000000001
+  },
+  {
+   "source": "sqrt(a^2 + b^2)",
+   "scope": {
+    "a": 3,
+    "b": 4
+   },
+   "value": 5.0
+  },
+  {
+   "source": "ln(e)",
+   "scope": {},
+   "value": 1.0
+  },
+  {
+   "source": "exp(1)",
+   "scope": {},
+   "value": 2.718281828459045
+  },
+  {
+   "source": "abs(-2.5)",
+   "scope": {},
+   "value": 2.5
+  },
+  {
+   "source": "floor(2.7)",
+   "scope": {},
+   "value": 2.0
+  },
+  {
+   "source": "min(a, b)",
+   "scope": {
+    "a": 2,
+    "b": -1
+   },
+   "value": -1.0
+  },
+  {
+   "source": "max(a, 3)",
+   "scope": {
+    "a": 2
+   },
+   "value": 3.0
+  },
+  {
+   "source": "(t^2 - 1)/(t - 1)",
+   "scope": {
+    "t": 1.5
+   },
+   "value": 2.5
+  },
+  {
+   "source": "1/t",
+   "scope": {
+    "t": 0
+   },
+   "value": null
+  },
+  {
+   "source": "0/0",
+   "scope": {},
+   "value": null
+  },
+  {
+   "source": "sqrt(-1)",
+   "scope": {},
+   "value": null
+  },
+  {
+   "source": "ln(0)",
+   "scope": {},
+   "value": null
+  },
+  {
+   "source": "(-8)^(1/3)",
+   "scope": {},
+   "value": null
+  },
+  {
+   "source": "exp(1000)",
+   "scope": {},
+   "value": null
+  },
+  {
+   "source": "y",
+   "scope": {},
+   "value": null
+  },
+  {
+   "source": "+-+2",
+   "scope": {},
+   "value": -2.0
+  },
+  {
+   "source": "3*m + c",
+   "scope": {
+    "m": -1.5,
+    "c": 0.5
+   },
+   "value": -4.0
+  },
+  {
+   "source": "atan(1)*4",
+   "scope": {},
+   "value": 3.141592653589793
+  },
+  {
+   "source": "asin(2)",
+   "scope": {},
+   "value": null
+  },
+  {
+   "source": ".5 + 1.",
+   "scope": {},
+   "value": 1.5
+  }
+ ],
+ "invalid": [
+  "",
+  "x y",
+  "import(1)",
+  "2 +",
+  "foo(1)",
+  "sin(1, 2)",
+  "min(1)",
+  "a.b",
+  "2 ** 3",
+  "((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))",
+  "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+  "__class__"
+ ]
+}

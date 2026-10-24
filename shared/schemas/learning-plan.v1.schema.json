@@ -73,6 +73,41 @@
       ],
       "default": null,
       "title": "Graph Context"
+    },
+    "planned_by": {
+      "default": "authored",
+      "title": "Planned By",
+      "type": "string"
+    },
+    "concept_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Concept Id"
+    },
+    "generated": {
+      "default": false,
+      "title": "Generated",
+      "type": "boolean"
+    },
+    "tutor": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Tutor"
     }
   },
   "required": [

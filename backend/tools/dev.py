@@ -22,6 +22,11 @@ def main():
     os.environ["LUCID_DATABASE_URL"] = "sqlite:///backend/demo.db"
     os.environ["LUCID_TOKENS_JSON"] = json.dumps({token: user})
     print("\nLocal demo token (private; paste in frontend):\n" + token, flush=True)
+    print("\nVoice: " + ("enabled (OPENAI_API_KEY set)" if os.getenv("OPENAI_API_KEY")
+                         else "off; export OPENAI_API_KEY to enable the realtime voice tutor"), flush=True)
+    print("Lesson planner: " + ("Claude (ANTHROPIC_API_KEY set)" if os.getenv("ANTHROPIC_API_KEY")
+                                 else "authored examples; export ANTHROPIC_API_KEY to let Claude choose examples"),
+          flush=True)
     print("\nFrontend: http://localhost:5173 | Backend docs: http://127.0.0.1:"
           + str(args.port) + "/docs\nOne worker; stop with Ctrl+C.\n", flush=True)
     uvicorn.run("backend.app.main:app", host="127.0.0.1", port=args.port, ws_max_size=16384)

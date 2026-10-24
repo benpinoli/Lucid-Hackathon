@@ -16,7 +16,15 @@ from pydantic import Field, ValidationError as SchemaError
 from memory_graph import Conflict, GraphError, MemoryGraph, NotFound, ResourceLimit
 
 from .scene import Id, MAX_BYTES, StrictModel
+from .author import ClaudeAuthor
+from .goals import Curriculum, Goals
+from .tutor import Tutor
+from .learning import plan
+from .planner import ClaudePlanner
 from .service import TutorService
+from .voice import OpenAIRealtime, VoiceError
+
+FROM_ENV = object()
 
 
 class Turn(StrictModel):
@@ -25,6 +33,38 @@ class Turn(StrictModel):
     expected_epoch: Annotated[int, Field(ge=0)]
     sources: Annotated[list[Id], Field(max_length=64)] = Field(default_factory=list)
     target: Id | None = None
+    concept: Id | None = None  # Teach this curriculum concept (a route step).
+    route_to: Id | None = None  # Show the learner's route map to this goal.
+
+
+class GoalRequest(StrictModel):
+    text: Annotated[str, Field(min_length=1, max_length=500)]
+
+
+class Answer(StrictModel):
+    concept_id: Id
+    choice: Annotated[int, Field(ge=0, le=9)] | None  # None means "not sure".
+
+
+class Diagnostic(StrictModel):
+    answers: Annotated[list[Answer], Field(min_length=1, max_length=16)]
+    expected_revision: Annotated[int, Field(ge=0)]
+    idempotency_key: Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,40}$")]
+
+
+class Progress(StrictModel):
+    concept_id: Id
+    score: Annotated[float, Field(ge=1, le=10)]
+    previous_concept_id: Id | None = None
+    expected_revision: Annotated[int, Field(ge=0)]
+    idempotency_key: Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,40}$")]
+
+
+class TutorAction(StrictModel):
+    type: Literal["tutor"] = "tutor"
+    action: Literal["goal", "answer", "confused", "question", "continue", "explore"]
+    text: Annotated[str, Field(max_length=2000)] = ""
+    expected_epoch: Annotated[int, Field(ge=0)]
 
 
 class Control(StrictModel):
@@ -46,7 +86,7 @@ class Assessment(StrictModel):
     expected_revision: Annotated[int, Field(ge=0)]
 
 
-def create_app(graph=None, tokens=None, origins=None):
+def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FROM_ENV, author=FROM_ENV):
     @asynccontextmanager
     async def lifespan(app):
         credentials = tokens if tokens is not None else json.loads(os.getenv("LUCID_TOKENS_JSON", "{}"))
@@ -55,7 +95,22 @@ def create_app(graph=None, tokens=None, origins=None):
             raise RuntimeError("Configure LUCID_TOKENS_JSON: {long random token: provisioned human UUID}")
         app.state.tokens = credentials
         app.state.graph = graph or MemoryGraph.open(os.getenv("LUCID_DATABASE_URL", "sqlite:///lucid.db"))
-        app.state.service = TutorService(app.state.graph)
+        # None keeps the keyword-routed authored lessons; no provider is ever required.
+        app.state.planner = ClaudePlanner.from_env() if planner is FROM_ENV else planner
+        planner_fn = app.state.planner.plan if app.state.planner else plan
+        curriculum = Curriculum().sync(app.state.graph)
+        resolver = app.state.planner.resolver(curriculum) if app.state.planner else None
+        app.state.curriculum = curriculum
+        goals = Goals(app.state.graph, curriculum, planner_fn, resolver)
+        if author is not FROM_ENV:
+            app.state.author = author
+        else:
+            app.state.author = (ClaudeAuthor(app.state.planner.client, app.state.planner.model)
+                                if app.state.planner else None)
+        app.state.service = TutorService(app.state.graph, planner_fn, goals,
+                                         Tutor(app.state.graph, goals, planner_fn, app.state.author))
+        # None disables voice; text lessons keep working without any provider.
+        app.state.voice = OpenAIRealtime.from_env() if voice is FROM_ENV else voice
         try:
             yield
         finally:
@@ -103,9 +158,21 @@ def create_app(graph=None, tokens=None, origins=None):
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "scene_schema_version": 1, "voice": "text_only",
+        return {"status": "ok", "scene_schema_version": 1,
+                "voice": "realtime" if app.state.voice else "text_only",
+                "planner": "claude" if app.state.planner else "authored",
+                "author": "claude" if app.state.author else "authored",
                 "formula_id": app.state.graph.methodology.formula_id,
                 "epsilon": app.state.graph.methodology.epsilon}
+
+    @app.post("/api/voice/sessions", status_code=201)
+    def voice_session(user=Depends(identity)):
+        if not app.state.voice:
+            raise HTTPException(503, "Voice is not configured; set OPENAI_API_KEY on the backend")
+        try:
+            return app.state.voice.create_credential()
+        except VoiceError as exc:
+            raise HTTPException(502, str(exc)) from exc
 
     @app.post("/api/lessons", status_code=201)
     def create_lesson(user=Depends(identity)):
@@ -121,11 +188,48 @@ def create_app(graph=None, tokens=None, origins=None):
         with app.state.service.lock:
             app.state.service.owned(user, lesson_id)
             del app.state.service.lessons[lesson_id]
+            app.state.service.sessions.pop(lesson_id, None)
 
     @app.post("/api/lessons/{lesson_id}/turns")
     def turn(lesson_id: str, body: Turn, user=Depends(identity)):
         return app.state.service.turn(user, lesson_id, body.text, body.expected_epoch,
-                                      body.sources, body.target)
+                                      body.sources, body.target, body.concept, body.route_to)
+
+    @app.post("/api/lessons/{lesson_id}/tutor")
+    def tutor(lesson_id: str, body: TutorAction, user=Depends(identity)):
+        return app.state.service.tutor_turn(user, lesson_id, body.action, body.text, body.expected_epoch)
+
+    @app.get("/api/me")
+    def me(user=Depends(identity)):
+        return {"user_id": user, "revision": app.state.graph.human(user).revision}
+
+    @app.get("/api/curriculum")
+    def curriculum(user=Depends(identity)):
+        return app.state.curriculum.listing()
+
+    @app.post("/api/users/{user_id}/goals")
+    def goal(user_id: str, body: GoalRequest, user=Depends(identity)):
+        scoped(user, user_id)
+        return app.state.service.goals.start(user, body.text)
+
+    @app.post("/api/users/{user_id}/goals/{target_id}/diagnostic")
+    def diagnostic(user_id: str, target_id: str, body: Diagnostic, user=Depends(identity)):
+        scoped(user, user_id)
+        answers = [(a.concept_id, a.choice) for a in body.answers]
+        return app.state.service.write_goal("diagnose", user, target_id, answers,
+                                            body.expected_revision, body.idempotency_key)
+
+    @app.get("/api/users/{user_id}/goals/{target_id}/route")
+    def route(user_id: str, target_id: str, user=Depends(identity)):
+        scoped(user, user_id)
+        return app.state.service.goals.route(user, target_id)
+
+    @app.post("/api/users/{user_id}/progress")
+    def progress(user_id: str, body: Progress, user=Depends(identity)):
+        scoped(user, user_id)
+        return app.state.service.write_goal("progress", user, body.concept_id, body.score,
+                                            body.previous_concept_id, body.expected_revision,
+                                            body.idempotency_key)
 
     @app.post("/api/users/{user_id}/learning-path")
     def path(user_id: str, body: PathRequest, user=Depends(identity)):
@@ -144,10 +248,11 @@ def create_app(graph=None, tokens=None, origins=None):
 
     @app.get("/api/recipes/{recipe_id}/manifest")
     def manifest(recipe_id: str, user=Depends(identity)):
-        if recipe_id not in {"vector_projection_v1", "whiteboard_v1"}:
+        if recipe_id not in {"vector_projection_v1", "dijkstra_v1", "mean_value_v1", "whiteboard_v1"}:
             raise HTTPException(404, "Unknown recipe")
-        return {"recipe_id": recipe_id, "schema_version": 1, "local_bindings": [
-            "projection.angle", "projection.length"], "execution": "authored_client_runtime"}
+        bindings = ["projection.angle", "projection.length"] if recipe_id == "vector_projection_v1" else []
+        return {"recipe_id": recipe_id, "schema_version": 1, "local_bindings": bindings,
+                "execution": "authored_client_runtime"}
 
     @app.websocket("/ws/scenes")
     async def scenes(ws: WebSocket, lesson_id: str):
@@ -183,10 +288,16 @@ def create_app(graph=None, tokens=None, origins=None):
                     return
                 try:
                     data = json.loads(raw)
-                    if data.get("type") == "turn":
+                    if data.get("type") == "tutor":
+                        req = TutorAction.model_validate(data)
+                        result = await asyncio.to_thread(service.tutor_turn, user, lesson_id,
+                                                         req.action, req.text, req.expected_epoch)
+                        await ws.send_json({"type": "lesson.turn", **result})
+                    elif data.get("type") == "turn":
                         req = Turn.model_validate(data)
                         result = await asyncio.to_thread(service.turn, user, lesson_id,
-                            req.text, req.expected_epoch, req.sources, req.target)
+                            req.text, req.expected_epoch, req.sources, req.target,
+                            req.concept, req.route_to)
                         await ws.send_json({"type": "lesson.turn", **result})
                     else:
                         control = Control.model_validate(data)

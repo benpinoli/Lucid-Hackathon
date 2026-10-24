@@ -1,0 +1,195 @@
+"""The tutor's writer: explanations with diagrams, check questions, grading, new concepts.
+
+Claude writes in the diagram language (diagrams.py); LUCID validates and computes geometry.
+Every call degrades to None (or a local heuristic for grading) so the tutor keeps working
+without a provider. Learner words are sent to the model but never logged.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+from dataclasses import dataclass
+from typing import Literal
+
+import anthropic
+from pydantic import BaseModel, ConfigDict
+
+from .diagrams import AUTHORED, DiagramError, DiagramLesson, compile_lesson
+from .learning import LessonPlan
+
+log = logging.getLogger("lucid.author")
+
+DIAGRAM_RULES = """Diagram language (LUCID computes all geometry; you never give pixel coordinates):
+- axes: true for anything on a coordinate plane (view is about -4.5..4.5 in x and y).
+- sliders: up to 3 parameters, each one lowercase letter other than e or t, with a short label,
+  min < max and a default value. Use them so the learner can explore the idea by moving it.
+- curves: parametric (x(t), y(t)) for t_min..t_max, e.g. a function plot x="t", y="0.5*t^2".
+  Segments are curves too: x="a*t", y="b*t" for t in 0..1.
+- arrows: start and end coordinates; points: a coordinate with optional short text.
+- Expressions use + - * / ^, parentheses, numbers, pi, e, the sliders' letters (and t in
+  curves), and sin cos tan asin acos atan exp ln sqrt abs floor min max. Always write *.
+- labels: short static text at fixed numeric positions within -5.5..5.5; the title shows at the top.
+- graph: for discrete structures, 2-7 nodes with short labels, up to 10 edges with optional
+  numeric weights, and an optional highlighted node path. LUCID lays it out.
+- At the default slider values everything must sit inside the view. 30 objects at most
+  (a graph costs about 2 per node and 1-2 per edge).
+- Element ids: lowercase letters, digits and underscores, unique.
+Beats are spoken aloud, in order: 2-5 beats, each one or two plain sentences under 35 words,
+no markup or symbols that do not read aloud well. Each beat lists the element ids it is about
+(focus); graph nodes are referenced by id, graph edges as "a-b", and "graph" for all of it.
+Only state facts the diagram shows or that are standard and certain. Keep it simple."""
+
+EXAMPLE = json.dumps(AUTHORED["derivatives"].model_dump(), ensure_ascii=False)
+
+
+class _Spec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class Check(_Spec):
+    question: str
+    expected_answer: str
+
+
+class Explanation(_Spec):
+    lesson: DiagramLesson
+    check: Check | None
+    # For clarifications: a more basic concept the learner seems to be missing, if any.
+    prerequisite: str | None
+
+
+class Grade(_Spec):
+    verdict: Literal["correct", "partly", "wrong", "unsure"]
+    feedback: str
+
+
+class ConceptLink(_Spec):
+    concept: str
+    similarity: int
+
+
+class ConceptSpec(_Spec):
+    name: str
+    description: str
+    links: list[ConceptLink]
+
+
+@dataclass
+class Written:
+    plan: LessonPlan
+    check: Check | None
+    prerequisite: str | None
+
+
+UNSURE = re.compile(r"\b(not sure|don'?t know|no idea|unsure|skip|i'?m lost|pass)\b")
+WORDS = {w: str(i) for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve".split())}
+
+
+def _normal(text):
+    text = text.casefold()
+    text = re.sub(r"[a-z]+", lambda m: WORDS.get(m.group(), m.group()), text)
+    return re.sub(r"[\s(),.\[\]'\"!?]+", "", text)
+
+
+def grade_locally(answer, expected, choices=None, correct=None):
+    """Deterministic grading for authored multiple-choice questions and short exact answers."""
+    if not answer.strip() or UNSURE.search(answer.casefold()):
+        return "unsure", "No problem, that tells me where to start."
+    said = _normal(answer)
+    if choices:
+        letter = re.fullmatch(r"\W*(?:option\s*)?([a-d])\W*", answer.casefold())
+        if letter:
+            picked = "abcd".index(letter.group(1))
+            return ("correct", "That's right.") if picked == correct else ("wrong", f"Not quite: it's {choices[correct]}.")
+        forms = [_normal(choice) for choice in choices]
+        matched = [i for i, form in enumerate(forms) if form == said] or [
+            i for i, form in enumerate(forms) if form and form in said]
+        # "2x" contains "x" and "2": keep only the most specific choices that were said.
+        matched = [i for i in matched if not any(i != j and forms[i] in forms[j] for j in matched)]
+        if matched == [correct]:
+            return "correct", "That's right."
+        if len(matched) == 1:
+            return "wrong", f"Not quite: it's {choices[correct]}."
+        return "unsure", f"I didn't catch one choice; the answer is {choices[correct]}."
+    return ("correct", "That's right.") if _normal(expected) in said else ("wrong", f"Not quite: it's {expected}.")
+
+
+class ClaudeAuthor:
+    def __init__(self, client, model: str = "claude-opus-5-5"):
+        self.client, self.model = client, model
+
+    def _parse(self, schema, system, messages, effort="low"):
+        response = self.client.beta.messages.parse(
+            model=self.model, max_tokens=16000, system=system, messages=messages, output_format=schema,
+            output_config={"effort": effort}, betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+        if response.stop_reason == "refusal" or response.parsed_output is None:
+            raise DiagramError(f"No usable output (stop_reason={response.stop_reason})")
+        return response
+
+    def explain(self, concept, description, context, request=None) -> Written | None:
+        """A diagram lesson for a concept, or a focused answer to the learner's words."""
+        task = (f"The learner said: {request!r}\nWrite a short, deeper explanation that resolves exactly that, "
+                "with a new diagram. If the trouble is really a missing, more basic concept, name it in "
+                "prerequisite; otherwise null." if request else
+                "Teach this concept from scratch for this learner. prerequisite is null.")
+        system = ("You are LUCID, a patient tutor in a 3D space. You write one explanation at a time as spoken "
+                  "beats over an interactive diagram, plus a one-line check question answerable in a few words "
+                  f"(with its expected answer).\n\n{DIAGRAM_RULES}\n\nExample lesson:\n{EXAMPLE}")
+        user = (f"Concept: {concept}\nWhat it is: {description or 'not described yet'}\n"
+                f"Learner context: {json.dumps(context)}\n{task}")
+        messages = [{"role": "user", "content": user}]
+        try:
+            for attempt in range(2):
+                response = self._parse(Explanation, system, messages)
+                written = response.parsed_output
+                try:
+                    plan = compile_lesson(written.lesson, recipe_id="generated_v1", generated=True)
+                except DiagramError as exc:
+                    if attempt:
+                        raise
+                    messages += [{"role": "assistant", "content": response.content},
+                                 {"role": "user", "content": f"LUCID could not draw that diagram: {exc}. Fix it."}]
+                    continue
+                return Written(plan, written.check, (written.prerequisite or "").strip() or None)
+        except (anthropic.APIError, ValueError) as exc:
+            log.warning("Claude explanation failed: %s", type(exc).__name__)
+        return None
+
+    def question(self, concept, description) -> Check | None:
+        try:
+            response = self._parse(Check, "Write one short spoken check question that tests real understanding "
+                                   "of the concept and is answerable in a few words, plus its expected answer.",
+                                   [{"role": "user", "content": f"Concept: {concept}\n{description}"}])
+            return response.parsed_output
+        except (anthropic.APIError, ValueError) as exc:
+            log.warning("Claude question failed: %s", type(exc).__name__)
+            return None
+
+    def grade(self, question, expected, answer, choices=None):
+        options = f"\nChoices: {list(choices)}" if choices else ""
+        try:
+            response = self._parse(Grade, "Grade a learner's spoken answer (it is a speech transcript, so ignore "
+                                   "small transcription errors). unsure means they said they don't know. Feedback "
+                                   "is one short, kind spoken sentence that states the right answer if they missed it.",
+                                   [{"role": "user", "content": f"Question: {question}{options}\nExpected: {expected}\n"
+                                                                f"Learner said: {answer}"}])
+            grade = response.parsed_output
+            return grade.verdict, grade.feedback.strip()[:200] or "Thanks."
+        except (anthropic.APIError, ValueError) as exc:
+            log.warning("Claude grading failed: %s", type(exc).__name__)
+            return None
+
+    def concept(self, request, existing) -> ConceptSpec | None:
+        """A new concept for the shared graph, linked to concepts it directly builds on."""
+        system = ("Define one learnable concept for a knowledge graph. name: its usual short name. description: "
+                  "two plain sentences. links: 1-3 existing concepts it DIRECTLY builds on or is built on by, "
+                  "chosen only from the list, with similarity 1-10 (10 = nearly the same idea). Never link "
+                  "loosely related ideas: routes may only cross real prerequisite steps.")
+        try:
+            response = self._parse(ConceptSpec, system, [{"role": "user", "content":
+                                   f"Concept requested: {request}\nExisting concepts: {json.dumps(existing)}"}])
+            return response.parsed_output
+        except (anthropic.APIError, ValueError) as exc:
+            log.warning("Claude concept creation failed: %s", type(exc).__name__)
+            return None

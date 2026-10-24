@@ -8,11 +8,16 @@ from memory_graph import Conflict, NotFound, shortest_path
 
 from .learning import plan
 from .scene import Event, Replace, SceneState
+from .tutor import Session
 
 
 class TutorService:
-    def __init__(self, graph):
+    def __init__(self, graph, planner=plan, goals=None, tutor=None):
         self.graph = graph
+        self.planner = planner
+        self.goals = goals
+        self.tutor = tutor
+        self.sessions = {}  # lesson ID -> tutor Session; process-local like lessons.
         self.lock = RLock()
         self.lessons = {}
         self.snapshots = OrderedDict()
@@ -51,15 +56,50 @@ class TutorService:
                 raise ValidationError("Requested formula is not the active graph methodology")
             return shortest_path(snapshot, sources, target).to_dict()
 
-    def turn(self, user, lesson, text, expected_epoch, sources=(), target=None):
+    def turn(self, user, lesson, text, expected_epoch, sources=(), target=None, concept=None, route_to=None):
         started = monotonic()
+        with self.lock:
+            if self.owned(user, lesson).epoch != expected_epoch:
+                raise Conflict("Stale turn epoch; request snapshot")
+        # Planning may call a remote model, so it runs outside the lock; the epoch is rechecked
+        # before commit so an interruption or competing turn during planning wins.
+        if (concept or route_to) and self.goals is None:
+            raise NotFound("Learning goals are not configured")
+        if route_to:
+            teaching = self.goals.route_lesson(user, route_to)
+        elif concept:
+            teaching = self.goals.concept_lesson(concept)
+        else:
+            teaching = self.planner(text)
+            if self.goals is not None:
+                teaching = self.goals.tag(text, teaching)
+        planned = monotonic()
+        with self.lock:
+            if target is not None:
+                teaching.graph_context = self.path(user, sources, target)
+        return self._commit(user, lesson, expected_epoch, teaching, started, planned)
+
+    def tutor_turn(self, user, lesson, action, text, expected_epoch):
+        """One conversational step; the session lock serializes a lesson, never the whole service."""
+        started = monotonic()
+        if self.tutor is None:
+            raise NotFound("The tutor is not configured")
+        with self.lock:
+            if self.owned(user, lesson).epoch != expected_epoch:
+                raise Conflict("Stale turn epoch; request snapshot")
+            session = self.sessions.setdefault(lesson, Session())
+        with session.lock:
+            teaching = self.tutor.act(session, user, action, text)
+        planned = monotonic()
+        with self.lock:
+            self.snapshots.clear()  # Graded answers may have changed personal scores.
+        return self._commit(user, lesson, expected_epoch, teaching, started, planned)
+
+    def _commit(self, user, lesson, expected_epoch, teaching, started, planned):
         with self.lock:
             state = self.owned(user, lesson)
             if state.epoch != expected_epoch:
-                raise Conflict("Stale turn epoch; request snapshot")
-            teaching = plan(text)
-            if target is not None:
-                teaching.graph_context = self.path(user, sources, target)
+                raise Conflict("Lesson changed while planning; request snapshot")
             turn_id, utterance_id = uuid4().hex, uuid4().hex
             next_epoch = state.epoch + 1
             event = Event(event_id=uuid4().hex, lesson_id=lesson, scene_id=state.scene_id,
@@ -74,7 +114,8 @@ class TutorService:
                 raise
             return {"plan": teaching.model_dump(), "events": [event.model_dump()],
                     "turn_epoch": state.epoch, "turn_id": turn_id, "utterance_id": utterance_id,
-                    "timings": {"plan_and_commit_ms": (monotonic() - started) * 1000}}
+                    "timings": {"plan_ms": (planned - started) * 1000,
+                                "plan_and_commit_ms": (monotonic() - started) * 1000}}
 
     def interrupt(self, user, lesson, expected_epoch):
         with self.lock:
@@ -83,6 +124,15 @@ class TutorService:
                 raise Conflict("Stale interruption")
             state.epoch += 1
             return state.snapshot()  # retained objects survive cancellation
+
+    def write_goal(self, method, *args):
+        """Goal writes change personal scores, so cached path snapshots must go."""
+        if self.goals is None:
+            raise NotFound("Learning goals are not configured")
+        with self.lock:
+            result = getattr(self.goals, method)(*args)
+            self.snapshots.clear()
+            return result
 
     def assess(self, user, request):
         with self.lock:
