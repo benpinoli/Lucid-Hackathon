@@ -181,6 +181,8 @@ LESSON_SYSTEM = (
     "separate illustrator then builds an animated picture, in 3D and 2D, for every step from your notes. "
     "Honor the learner's request even if they already know the topic: review with a fresh example or extend "
     "their understanding. Use the ordered teaching sequence and nearby known concepts as bridges.\n\n"
+    "TEACHING STYLE: Give the lesson in the style of Jay Cummings. Keep the step-by-step spoken format "
+    "and visual teaching requirements below.\n\n"
     "STEPS: break the idea into as many small steps as it needs, usually 4 to 10 and more for a hard idea "
     f"(at most {MAX_STEPS}). Never pack two ideas into one step: if a step feels big, split it. The app pauses "
     "after each step for the learner to predict or think, so each step must stand on its own. say is spoken "
