@@ -18,6 +18,12 @@ from .learning import LessonError, LessonPlan, complex_quadratic_lesson, dijkstr
 log = logging.getLogger("lucid.planner")
 
 
+# Measured on the live API: planning, grading and questions take 1-6 s; a diagram explanation
+# takes 8-12 s. Quick calls fail fast to keep fallbacks responsive; explanations get room.
+QUICK_TIMEOUT = 20.0
+EXPLAIN_TIMEOUT = 60.0
+
+
 def describe_failure(exc) -> str:
     """API errors carry the provider's reason (never learner text); others log only their type."""
     if isinstance(exc, anthropic.APIStatusError):
@@ -111,7 +117,7 @@ def build(choice: LessonChoice) -> LessonPlan | None:
 class ClaudePlanner:
     """Turns a learner request into recipe parameters. Configure by environment only."""
 
-    def __init__(self, client, model: str = "claude-opus-5-5"):
+    def __init__(self, client, model: str = "claude-sonnet-5-5"):
         self.client, self.model = client, model
 
     @classmethod
@@ -119,8 +125,9 @@ class ClaudePlanner:
         if not os.getenv("ANTHROPIC_API_KEY"):
             return None
         # Bounded so a slow provider degrades to authored lessons inside the client's deadline.
-        client = anthropic.Anthropic(timeout=12.0, max_retries=0)
-        return cls(client, os.getenv("LUCID_PLANNER_MODEL", "claude-opus-5-5"))
+        # Explanations override this per request (see ClaudeAuthor._tool).
+        client = anthropic.Anthropic(timeout=QUICK_TIMEOUT, max_retries=0)
+        return cls(client, os.getenv("LUCID_PLANNER_MODEL", "claude-sonnet-5-5"))
 
     def _ask(self, messages):
         response = self.client.beta.messages.parse(

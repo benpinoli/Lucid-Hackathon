@@ -5,6 +5,7 @@ import planSchema from '../../shared/schemas/learning-plan.v1.schema.json';
 export type Point = [number, number];
 export type SpatialPoint = Point | [number, number, number];
 type ExprPoint = [string, string] | [string, string, string];
+type ExprTriple = [string, string, string];
 export type Content =
   | { primitive: 'axes2d'; extent: number }
   | { primitive: 'axes3d'; extent: number; labels: string[] }
@@ -15,7 +16,8 @@ export type Content =
   | { primitive: 'expr_curve'; x: string; y: string; z?: string | null; t_min: number; t_max: number; samples: number }
   | { primitive: 'expr_surface'; x: string; y: string; z: string; u_min: number; u_max: number; v_min: number; v_max: number; samples: number }
   | { primitive: 'expr_arrow'; start: ExprPoint; end: ExprPoint }
-  | { primitive: 'expr_point'; at: ExprPoint; text: string | null };
+  | { primitive: 'expr_point'; at: ExprPoint; text: string | null }
+  | { primitive: 'model3d'; model: string; position: ExprTriple; size: string; rotation: ExprTriple; clip: string | null };
 export interface SceneNode { id: string; content: Content; style: 'primary' | 'secondary' | 'muted'; visible: boolean; coordinate_system: 'lesson_xy' | 'lesson_xyz' }
 export interface Snapshot {
   schema_version: 1; lesson_id: string; scene_id: string; turn_epoch: number;
@@ -26,8 +28,13 @@ export interface SceneEvent {
   schema_version: 1; event_id: string; lesson_id: string; scene_id: string;
   turn_epoch: number; seq: number; base_revision: number; operation: Operation;
 }
+/** What only the client knows about the learner's screen; sent with every tutor action. */
+export interface LearnerView { active_beat: number | null; sliders: Record<string, number>; animating: string | null; in_vr: boolean }
 export interface TutorState { mode: string; awaiting_answer: boolean; goal: string | null; exercise?: string | null; step?: number; total_steps?: number }
-export interface Plan { recipe_id: string; planned_by?: string; concept_id?: string | null; generated?: boolean; graph_context?: Record<string, unknown> | null; tutor?: TutorState | null; beats: { beat_id: string; say_text: string; focus_ids: string[] }[] }
+/** Slide one slider from start to end while its beat is spoken. */
+export interface BeatAnimation { binding: string; start: number; end: number; seconds: number }
+export interface Beat { beat_id: string; say_text: string; focus_ids: string[]; animations?: BeatAnimation[] }
+export interface Plan { recipe_id: string; planned_by?: string; concept_id?: string | null; generated?: boolean; graph_context?: Record<string, unknown> | null; tutor?: TutorState | null; beats: Beat[] }
 const ajv = new Ajv2020({ strict: false, allErrors: false });
 const validateEvent = ajv.compile<SceneEvent>(eventSchema);
 const validatePlan = ajv.compile<Plan>(planSchema);
@@ -46,7 +53,7 @@ const validateSnapshot = ajv.compile<Snapshot>({
 function checkNodes(nodes: SceneNode[]) {
   if (nodes.length > 30 || new Set(nodes.map(n => n.id)).size !== nodes.length) throw new Error('Invalid scene object budget or duplicate ID');
   for (const { content: c } of nodes) {
-    if (!['axes2d', 'axes3d', 'vector_arrow', 'line_curve', 'text_label', 'slider', 'expr_curve', 'expr_arrow', 'expr_point', 'expr_surface'].includes(c.primitive)) throw new Error('Explicit primitive discriminator required');
+    if (!['axes2d', 'axes3d', 'vector_arrow', 'line_curve', 'text_label', 'slider', 'expr_curve', 'expr_arrow', 'expr_point', 'expr_surface', 'model3d'].includes(c.primitive)) throw new Error('Explicit primitive discriminator required');
     if ((c.primitive === 'vector_arrow' || c.primitive === 'expr_arrow') && (c.start?.length ?? 2) !== c.end.length) throw new Error('Mismatched arrow dimensions');
     if (c.primitive === 'expr_surface' && (!(c.u_min < c.u_max) || !(c.v_min < c.v_max))) throw new Error('Invalid surface domain');
     if (c.primitive === 'slider' && (!(c.minimum < c.maximum) || c.value < c.minimum || c.value > c.maximum || (c.binding === 'projection.length' && c.minimum < 0))) {
@@ -66,6 +73,7 @@ function materializeNodes(nodes: SceneNode[]): SceneNode[] {
     if (content.primitive === 'expr_surface') content = { ...content, samples: content.samples ?? 24 };
     if (content.primitive === 'expr_arrow') content = { ...content, start: content.start ?? ['0', '0'] };
     if (content.primitive === 'expr_point') content = { ...content, text: content.text ?? null };
+    if (content.primitive === 'model3d') content = { ...content, position: content.position ?? ['0', '0', '0'], size: content.size ?? '2', rotation: content.rotation ?? ['0', '0', '0'], clip: content.clip ?? null };
     return { ...node, style: node.style ?? 'primary', visible: node.visible ?? true, coordinate_system: node.coordinate_system ?? 'lesson_xy', content };
   });
 }
@@ -79,6 +87,7 @@ export function parsePlan(value: unknown): Plan {
   if (!validatePlan(value)) throw new Error('Unsupported teaching plan');
   if ('schema_version' in value && value.schema_version !== 1) throw new Error('Unsupported teaching plan version');
   if (value.beats.length > 32 || value.beats.some(b => b.say_text.length > 4000)) throw new Error('Teaching plan exceeds display budget');
+  if (value.beats.some(b => b.animations?.some(a => ![a.start, a.end, a.seconds].every(Number.isFinite)))) throw new Error('Invalid beat animation');
   return value;
 }
 

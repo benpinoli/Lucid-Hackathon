@@ -2,8 +2,10 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { evaluateSource } from './expressions';
-import type { SceneNode } from './protocol';
+import type { ModelCache } from './models';
+import type { Content, SceneNode } from './protocol';
 import { sampleSurface } from './geometry';
 import { GrabManager } from './manipulation';
 
@@ -14,14 +16,17 @@ const vector = (point: number[], depth = 0) => new THREE.Vector3(point[0], point
 function disposeTree(root: THREE.Object3D) {
   root.traverse(object => {
     const mesh = object as THREE.Mesh;
-    mesh.geometry?.dispose();
     const materials = mesh.material ? (Array.isArray(mesh.material) ? mesh.material : [mesh.material]) : [];
+    // Model geometry and textures belong to the shared cache; only per-instance materials go.
+    if (object.userData.lucidShared) { for (const material of materials) material.dispose(); return; }
+    mesh.geometry?.dispose();
     for (const material of materials) {
       (material as THREE.MeshBasicMaterial).map?.dispose(); material.dispose();
     }
   });
   root.clear();
 }
+type ModelContent = Extract<Content, { primitive: 'model3d' }>;
 function label(text: string, color: string, width = 2.4, height = 0.26, fit = false) {
   const canvas = document.createElement('canvas'); canvas.height = 256;
   const ctx = canvas.getContext('2d')!;
@@ -62,6 +67,9 @@ export class LessonRenderer {
   private marker = new THREE.Group();
   private xrActions: ((direction: number) => void) | undefined;
   private xrInterrupt: (() => void) | undefined;
+  private models: ModelCache | undefined;
+  private mixers = new Map<THREE.Object3D, THREE.AnimationMixer>();
+  private clock = new THREE.Clock();
 
   constructor(host: HTMLElement, xrHost: HTMLElement, private metrics: (text: string) => void, onError: (text: string) => void) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
@@ -78,6 +86,11 @@ export class LessonRenderer {
     this.controls.minDistance = 1; this.controls.maxDistance = 12;
     this.board.position.set(0, 1.45, -2.5); this.board.scale.setScalar(0.23);
     this.scene.add(this.board, this.caption, this.xrButtons);
+    // Catalog models use physical materials; diagram primitives are unlit and unaffected.
+    const environment = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = environment.fromScene(new RoomEnvironment(), 0.04).texture; environment.dispose();
+    const sun = new THREE.DirectionalLight(0xffffff, 1.6); sun.position.set(2, 4, 3);
+    this.scene.add(new THREE.HemisphereLight(0xdff6ff, 0x1b2733, 1.2), sun);
     this.transform = new TransformControls(this.camera, this.renderer.domElement);
     this.scene.add(this.transform.getHelper());
     this.transform.addEventListener('dragging-changed', event => {
@@ -133,6 +146,8 @@ export class LessonRenderer {
       this.lastFrame = time;
       // Narration belongs below the drawing on desktop, never across the geometry.
       this.caption.visible = this.renderer.xr.isPresenting;
+      const delta = this.clock.getDelta();
+      for (const mixer of this.mixers.values()) mixer.update(delta);
       this.controls.update(); this.renderer.render(this.scene, this.camera);
       if (time - this.lastReport > 1000 && this.frameTimes.length) {
         const sorted = [...this.frameTimes].sort((a, b) => a - b);
@@ -200,6 +215,40 @@ export class LessonRenderer {
     });
   }
   setXRInterrupt(action?: () => void) { this.xrInterrupt = action; }
+  get presenting() { return this.renderer.xr.isPresenting; }
+  setModels(models: ModelCache) { this.models = models; }
+  private discard(child: THREE.Object3D) {
+    child.traverse(object => { this.mixers.get(object)?.stopAllAction(); this.mixers.delete(object); });
+    this.board.remove(child); disposeTree(child);
+  }
+  /** Placeholder now, catalog model when loaded; the pivot carries the expression-driven pose. */
+  private buildModel(group: THREE.Group, c: ModelContent) {
+    const pivot = new THREE.Group(); pivot.name = 'pivot'; group.add(pivot);
+    const placeholder = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: colors.muted, wireframe: true, transparent: true, opacity: 0.5 }));
+    pivot.add(placeholder);
+    const signature = group.userData.signature;
+    this.models?.instance(c.model).then(({ object, clips }) => {
+      if (group.parent !== this.board || group.userData.signature !== signature) return;
+      // Centre the model and scale its largest side to 1; the pivot scales it to `size`.
+      const box = new THREE.Box3().setFromObject(object); const extent = box.getSize(new THREE.Vector3());
+      const fit = new THREE.Group(); fit.scale.setScalar(1 / Math.max(extent.x, extent.y, extent.z, 1e-6));
+      object.position.sub(box.getCenter(new THREE.Vector3())); fit.add(object);
+      pivot.remove(placeholder); disposeTree(placeholder); pivot.add(fit);
+      const clip = c.clip ? clips.find(candidate => candidate.name === c.clip) : undefined;
+      if (clip) { const mixer = new THREE.AnimationMixer(object); mixer.clipAction(clip).play(); this.mixers.set(object, mixer); }
+      this.styleFocus(group, group.name);
+    }, error => console.warn(`Model ${c.model} unavailable`, error));
+  }
+  private poseModel(group: THREE.Object3D, c: ModelContent, params: Record<string, number>) {
+    const pivot = group.getObjectByName('pivot'); if (!pivot) return;
+    const position = c.position.map(source => evaluateSource(source, params));
+    const rotation = c.rotation.map(source => evaluateSource(source, params) * Math.PI / 180);
+    const size = evaluateSource(c.size, params);
+    pivot.visible = [...position, ...rotation, size].every(Number.isFinite) && position.every(v => Math.abs(v) <= CLIP) && size > 0;
+    if (!pivot.visible) return;
+    pivot.position.set(position[0], position[1], position[2]);
+    pivot.rotation.set(rotation[0], rotation[1], rotation[2]); pivot.scale.setScalar(size);
+  }
   /** Quiet provenance marker in the board's top-right corner, visible in VR too. */
   setMarker(text?: string) {
     disposeTree(this.marker);
@@ -234,16 +283,18 @@ export class LessonRenderer {
       position: child.position.clone(), quaternion: child.quaternion.clone(), scale: child.scale.clone() });
     const retained = new Map(this.board.children.filter(child => child.userData.nodeId).map(child => [child.name, child]));
     const incoming = new Set(nodes.filter(n => n.visible).map(n => n.id));
-    for (const [id, child] of retained) if (!incoming.has(id)) { this.board.remove(child); disposeTree(child); retained.delete(id); }
+    for (const [id, child] of retained) if (!incoming.has(id)) { this.discard(child); retained.delete(id); }
     for (const node of nodes) {
       if (!node.visible) continue;
+      // Models are re-posed, not rebuilt, when parameters change, so loads and clips continue.
       const signature = JSON.stringify(node) + (node.content.primitive.startsWith('expr_') ? JSON.stringify(params) : '');
       const existing = retained.get(node.id);
       if (existing?.userData.signature === signature) {
+        if (node.content.primitive === 'model3d') this.poseModel(existing, node.content, params);
         if (selected === node.id && this.manipulationMode !== 'orbit' && !this.renderer.xr.isPresenting) this.transform.attach(existing);
         continue;
       }
-      if (existing) { this.board.remove(existing); disposeTree(existing); }
+      if (existing) this.discard(existing);
       const group = new THREE.Group(); group.name = node.id; group.userData.nodeId = node.id;
       group.userData.signature = signature;
       const color = colors[node.style]; const c = node.content;
@@ -303,6 +354,7 @@ export class LessonRenderer {
         group.add(new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color, wireframe: true,
           side: THREE.DoubleSide, transparent: true, opacity: 0.55 })));
       }
+      else if (c.primitive === 'model3d') { this.buildModel(group, c); this.poseModel(group, c, params); }
       else if (c.primitive === 'text_label') {
         // Equations have a dedicated accessible, typeset panel outside the drawing.
         if (!(node.id === 'formula' || c.text.includes('$') || c.text.includes('\\('))) {

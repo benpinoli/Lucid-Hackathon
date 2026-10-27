@@ -12,18 +12,34 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
+/** Answers the conversational starting check: "yes" to the experience question, then each probe. */
+async function answerStartingCheck(page: import('@playwright/test').Page, answer: (question: string) => string) {
+  for (let i = 0; i < 10; i++) {
+    await expect(page.locator('#status')).toHaveText('Connected');
+    const exercise = await page.locator('#reply').getAttribute('data-exercise');
+    if (exercise !== 'experience' && exercise !== 'diagnostic') return;
+    const text = (await page.locator('#beats').textContent()) ?? '';
+    await page.locator('#reply-text').fill(exercise === 'experience' ? 'yes' : answer(text));
+    await page.locator('#reply-send').click();
+    await expect(page.locator('#status')).toHaveText('Connected');
+  }
+  throw new Error('The starting check did not finish');
+}
+
+/** Steps through a guided lesson until its last step is shown (lessons end without a check). */
 async function finishAuthoredSteps(page: import('@playwright/test').Page) {
   for (let i = 0; i < 8; i++) {
     await expect(page.locator('#status')).toHaveText('Connected');
     const exercise = await page.locator('#reply').getAttribute('data-exercise');
-    if (exercise === 'check') return;
+    const [step, total] = ((await page.locator('#reply').getAttribute('data-step')) ?? '').split('/');
+    if (!exercise && step === total) return;
     if (exercise === 'prediction_choice') {
       await page.locator('#reply-text').fill('A');
       await page.locator('#reply-send').click();
     } else await page.getByRole('button', { name: 'Continue', exact: true }).click();
     await expect(page.locator('#status')).toHaveText('Connected');
   }
-  throw new Error('The authored lesson did not reach its final retrieval check');
+  throw new Error('The authored lesson did not reach its last step');
 }
 
 test('real backend: auth, lesson, local slider, reconnect, interruption and cleanup', async ({ page }) => {
@@ -122,6 +138,9 @@ test('learner can review and go deeper after mastering a goal', async ({ page })
   await page.getByLabel('What do you want to learn?').fill('dot product');
   await page.getByLabel('Use memory to skip familiar prerequisites').check();
   await page.getByRole('button', { name: 'Start learning' }).click();
+  await expect(page.locator('#beats')).toContainText('Have you worked with Dot product before?');
+  await page.getByLabel('Your answer').fill('yes');
+  await page.getByRole('button', { name: 'Answer', exact: true }).click();
   await expect(page.locator('#beats')).toContainText('dot (3, 4)');
   await page.getByLabel('Your answer').fill('11');
   await page.getByRole('button', { name: 'Answer', exact: true }).click();
@@ -136,7 +155,7 @@ test('learner can review and go deeper after mastering a goal', async ({ page })
   await expect(page.getByRole('slider', { name: 'Vector angle' })).toBeVisible();
   await page.getByRole('button', { name: 'Go deeper', exact: true }).click();
   await expect(page.locator('#beats')).toContainText("Let's go further with Dot product");
-  await expect(page.locator('#beats')).toContainText('Quick check:');
+  await expect(page.locator('#beats')).toContainText('points along which axis');
   await expect(page.getByRole('button', { name: 'Ask a question', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
 });
@@ -151,19 +170,29 @@ test('shadow animation is local, pausable, typeset, and switches to the vector m
   await page.getByRole('button', { name: 'Start learning' }).click();
   await expect(page.locator('#shadow-story .katex')).toBeVisible();
   const vector = page.locator('#story-vector');
-  const before = await vector.getAttribute('d');
+  const equation = page.locator('#shadow-story .story-equation');
+  const angle = page.getByRole('slider', { name: 'Vector angle' });
   let commands = 0;
   page.on('websocket', socket => socket.on('framesent', () => commands++));
   let requests = 0; page.on('request', request => { if (request.url().includes('/api/')) requests++; });
-  await page.getByRole('button', { name: 'Play animation', exact: true }).click();
+  // The first beat asks how the shadow changes as the arrow rotates, and plays exactly that.
+  await expect.poll(() => angle.inputValue(), { timeout: 8000 }).toBe('90');
+  await expect(equation).toHaveAttribute('data-equation', /\|s\|=0\.00/);
+  await page.getByRole('button', { name: 'Reset parameters', exact: true }).click();
+  const before = await vector.getAttribute('d');
+  await page.getByRole('button', { name: 'Sweep freely', exact: true }).click();
   await expect.poll(() => vector.getAttribute('d')).not.toBe(before);
-  await page.getByRole('button', { name: 'Pause animation', exact: true }).click();
+  await page.getByRole('button', { name: 'Pause sweep', exact: true }).click();
   const paused = await vector.getAttribute('d');
   await page.waitForTimeout(250);
   expect(await vector.getAttribute('d')).toBe(paused);
-  expect(requests).toBe(0); expect(commands).toBe(0);
   await page.getByRole('button', { name: 'Reset parameters', exact: true }).click();
   expect(await vector.getAttribute('d')).toBe(before);
+  // Selecting a beat replays its motion from the spoken example to the shadowless angle.
+  expect(await angle.inputValue()).toBe('56.3');
+  await page.locator('#beats button', { hasText: 'How long will an arrow' }).click();
+  await expect.poll(() => angle.inputValue(), { timeout: 8000 }).toBe('90');
+  expect(requests).toBe(0); expect(commands).toBe(0);
   await page.getByRole('button', { name: 'Vector model', exact: true }).click();
   await expect(page.locator('#viewport canvas')).toBeVisible();
   await expect(page.locator('#shadow-story')).toBeHidden();
@@ -212,17 +241,12 @@ test('tutor: spoken-style check, silent route, interactive diagrams, confusion a
   await page.getByLabel('What do you want to learn?').fill('I want to learn the mean value theorem');
   await page.getByLabel('Use memory to skip familiar prerequisites').check();
   await page.getByRole('button', { name: 'Start learning' }).click();
-  await expect(page.locator('#beats')).toContainText('Is it parallel to the secant');
   const beats = page.locator('#beats');
+  // A conversational opening, then open questions: no options read out.
+  await expect(beats).toContainText('Have you worked with Mean value theorem before?');
   // Answer the starting check: only the functions question correctly.
-  for (let i = 0; i < 8 && !(await beats.textContent())?.includes("Next, let's look at"); i++) {
-    await expect(page.locator('#status')).toHaveText('Connected');
-    const text = (await beats.textContent()) ?? '';
-    await page.getByLabel('Your answer').fill(text.includes('2x + 1') ? '7' : 'not sure');
-    await page.getByRole('button', { name: 'Answer' }).click();
-    await expect(page.locator('#status')).toHaveText('Connected');
-  }
-  await expect(beats).toContainText("Next, let's look at Slope and secant lines.");
+  await answerStartingCheck(page, text => text.includes('2x + 1') ? '7' : 'not sure');
+  await expect(beats).toContainText("You know Functions, so let's start there.");
   await expect(beats).not.toContainText('route');
   await expect(beats).toContainText('Two points have the same height');
   // Every explanation has a diagram; its sliders re-plot locally.
@@ -233,13 +257,13 @@ test('tutor: spoken-style check, silent route, interactive diagrams, confusion a
   await expect(page.locator('#sliders output').first()).toHaveText('-2.50');
   expect(requests).toBe(0);
   await page.getByRole('button', { name: "I'm confused" }).click();
-  await expect(beats).toContainText("Let's slow down and go through it again.");
+  await expect(beats).toContainText("Let's go through it again, slower.");
   await expect(page.locator('#status')).toHaveText('Connected');
   await finishAuthoredSteps(page);
-  await page.getByLabel('Your answer').fill('3');
-  await page.getByRole('button', { name: 'Answer' }).click();
-  await expect(beats).toContainText("That's right.");
-  await expect(beats).toContainText("Next, let's look at Derivatives.");
+  // No quick check at the end: Continue moves along the route.
+  await expect(beats).not.toContainText('Quick check');
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await expect(beats).toContainText('Now, Derivatives.');
   await expect(page.getByRole('slider', { name: 'point x' })).toBeVisible();
   await page.waitForTimeout(300);
   await page.locator('#viewport').screenshot({ path: 'test-results/tutor-derivatives.png' });
@@ -284,15 +308,12 @@ test('learning day offers optional retrieval without showing the previous explan
   await page.getByLabel('What do you want to learn?').fill('vector length');
   await page.getByRole('button', { name: 'Start learning' }).click();
   await expect(page.locator('#status')).toHaveText('Connected');
-  if ((await page.locator('#reply').getAttribute('data-exercise')) === 'diagnostic') {
-    await page.locator('#reply-text').fill('5'); await page.locator('#reply-send').click();
-    await expect(page.locator('#status')).toHaveText('Connected');
-  }
+  await answerStartingCheck(page, () => '5');
   await expect(page.locator('.review-topic').first()).toBeVisible();
   const before = await page.request.get('/api/me/reviews', { headers: { Authorization: 'Bearer browser-test-only-not-a-real-secret' } });
   await page.getByRole('button', { name: 'Review due topics', exact: true }).click();
   await expect(page.locator('#reply')).toHaveAttribute('data-exercise', 'recall_choice');
-  await expect(page.locator('#beats')).toContainText('retrieve before looking');
+  await expect(page.locator('#beats')).toContainText("Let's see what you remember");
   await expect(page.locator('#scene-meta')).not.toContainText('0 objects');
   await page.getByRole('button', { name: 'Skip', exact: true }).click();
   await expect(page.locator('#status')).toHaveText('Connected');
@@ -300,4 +321,35 @@ test('learning day offers optional retrieval without showing the previous explan
   const scores = (value: { topics: { concept_id: string; mastery: number; reviews: number }[] }) => value.topics.map(t => [t.concept_id, t.mastery, t.reviews]).sort();
   expect(scores(await after.json())).toEqual(scores(await before.json()));
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+});
+
+test('tutor actions carry what the learner sees: active step and moved sliders', async ({ page }) => {
+  const sent: { type?: string; action?: string; view?: { active_beat: number | null; sliders: Record<string, number>; animating: string | null; in_vr: boolean } }[] = [];
+  page.on('websocket', socket => socket.on('framesent', frame => {
+    try { sent.push(JSON.parse(String(frame.payload))); } catch { /* auth frame only */ }
+  }));
+  await page.goto('/');
+  await page.getByLabel('Private backend token').fill('browser-test-only-not-a-real-secret');
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(page.locator('#status')).toHaveText('Connected');
+  await page.getByLabel('What do you want to learn?').fill('I want to learn the mean value theorem');
+  await page.getByLabel('Use memory to skip familiar prerequisites').check();
+  await page.getByRole('button', { name: 'Start learning' }).click();
+  const beats = page.locator('#beats');
+  // Earlier tests may already have taught this learner, so the check can be short or skipped.
+  await expect(page.locator('#status')).toHaveText('Connected');
+  await answerStartingCheck(page, text => text.includes('2x + 1') ? '7' : 'not sure');
+  await expect(beats.locator('button.beat').nth(1)).toBeVisible();
+  const goal = sent.find(frame => frame.type === 'tutor' && frame.action === 'goal');
+  expect(goal?.view).toEqual({ active_beat: null, sliders: {}, animating: null, in_vr: false });
+  await page.locator('#beats button.beat').nth(1).click();
+  // Slope ('first point') and Derivatives ('point x') both bind param.p.
+  const slider = page.locator('#sliders input[type=range]').first();
+  await slider.fill('-2.5'); await slider.dispatchEvent('input');
+  await page.getByRole('button', { name: "I'm confused" }).click();
+  await expect(page.locator('#status')).toHaveText('Connected');
+  const confused = sent.filter(frame => frame.type === 'tutor' && frame.action === 'confused').at(-1);
+  expect(confused?.view?.active_beat).toBe(1);
+  expect(confused?.view?.sliders['param.p']).toBe(-2.5);
+  expect(confused?.view?.in_vr).toBe(false);
 });

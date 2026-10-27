@@ -153,8 +153,10 @@ describe('voice narrator', () => {
     }
     await vi.waitFor(() => expect(sent.filter(event => event.item?.type === 'function_call_output')).toHaveLength(2));
     const outputs = sent.filter(event => event.item?.type === 'function_call_output').map(event => JSON.parse(event.item.output));
-    expect(outputs.every(output => typeof output.error === 'string')).toBe(true);
-    expect(sent.filter(event => event.type === 'response.create').every(event => !event.response)).toBe(true);
+    // The model is told only that it didn't work: no backend message reaches the learner.
+    expect(outputs).toEqual([{ error: 'That request did not go through.' }, { error: 'That request did not go through.' }]);
+    const apologies = sent.filter(event => event.type === 'response.create');
+    expect(apologies.every(event => event.response.instructions.includes('Never mention technical details'))).toBe(true);
   });
 
   it('tells the voice model to listen for an answer', async () => {
@@ -181,5 +183,43 @@ describe('voice narrator', () => {
     expect(creates()[0].response.instructions).not.toContain('Start at A.');
     play('r1');
     expect(focused).toEqual([1]);
+  });
+});
+
+describe('conversational speech', () => {
+  const turn: Plan = { recipe_id: 'diagram_v1', tutor: { mode: 'checking', awaiting_answer: true, goal: 'Slope' }, beats: [
+    { beat_id: 'i0', say_text: 'Exactly, 2x.', focus_ids: [] },
+    { beat_id: 'l0', say_text: 'The slope between two points is rise over run.', focus_ids: ['rule'] },
+    { beat_id: 'check', say_text: 'What is the slope from (1, 2) to (3, 8)?', focus_ids: [] },
+  ] };
+
+  it('lets the voice phrase reactions freely but reads lessons and questions word for word', () => {
+    const { narrator, creates } = setup();
+    narrator.narrate(turn);
+    const script = creates()[0].response.instructions as string;
+    expect(script).toContain('~ Exactly, 2x.\n\nThe slope between two points is rise over run.\n\nWhat is the slope from (1, 2) to (3, 8)?');
+    expect(script).toContain('Read every other paragraph exactly as written');
+  });
+
+  it('offers one hint after a long silence, never moving on by itself', () => {
+    const { narrator, creates, play, finish } = setup();
+    narrator.narrate(turn); play('r1'); finish('r1');
+    vi.advanceTimersByTime(19000);
+    expect(creates()).toHaveLength(1);
+    vi.advanceTimersByTime(1500);
+    expect(creates()).toHaveLength(2);
+    expect(creates()[1].response.instructions).toMatch(/~ .*hint/);
+    play('r2'); finish('r2');
+    vi.advanceTimersByTime(60000);
+    expect(creates()).toHaveLength(2);  // only once per question
+  });
+
+  it('does not nudge a learner who has started answering', () => {
+    const { narrator, creates, play, finish } = setup();
+    narrator.narrate(turn); play('r1'); finish('r1');
+    vi.advanceTimersByTime(5000);
+    narrator.handle({ type: 'input_audio_buffer.speech_started' });
+    vi.advanceTimersByTime(60000);
+    expect(creates()).toHaveLength(1);
   });
 });

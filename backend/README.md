@@ -64,12 +64,12 @@ a normal `lesson.turn` whose plan carries `tutor: {mode, awaiting_answer, goal}`
   "Next, let's look at X". Routes, costs and scores are never spoken or shown.
 - *Teaching*: verified recipe, else an authored diagram lesson (`diagrams.AUTHORED`, all 12
   non-recipe curriculum topics), else a Claude diagram lesson. Every explanation has a diagram.
-  Each ends with a spoken check question, graded and recorded (`voice_check`: 8/5/3/2), which
-  also rates the edge just crossed. Scores change only through graded answers.
+  Lessons end without a check question: after the last step, Continue moves along the route
+  (or back from a prerequisite detour). Scores change only through graded answers, so finishing
+  a lesson awards no mastery; the starting check, Active recall and Review warm-ups do.
 - *Confusion*: a deeper Claude explanation with a new diagram (or the lesson again, slower,
   without Claude). If Claude names a missing prerequisite the learner doesn't know, the tutor
-  detours to it and resumes afterwards. Asking for help never counts against the learner;
-  three wrong answers move on instead of looping.
+  detours to it and resumes afterwards. Asking for help never counts against the learner.
 - *New concepts*: goals or prerequisites the graph lacks are created by Claude and written to the
   shared God Brain through the engine's proposal API (submitted and accepted, with `claude:<model>`
   provenance), linked only to concepts they directly build on.
@@ -105,7 +105,8 @@ repeats a pending question; only an explicit Skip bypasses it, without awarding 
 Future focused geometry stays hidden until its step. Asking a side question preserves the
 pending task. Review and clarification use the same small-step flow.
 
-After the final check, the AI tutor looks for a direct God edge to another known concept
+Lessons no longer end with a check, so this synthesis/teach-back step (`Tutor._consolidate`) is
+currently not reached from a lesson. When run, the AI tutor looks for a direct God edge to another known concept
 that is absent from the personal edge set (or only has a legacy derived score). It asks a
 concrete synthesis task and records the graded result as `synthesis_retrieval` familiarity.
 It never creates an edge between disconnected or distant concepts. It then asks a teach-back;
@@ -156,6 +157,24 @@ and `expr_point` primitives. Formulas stay symbolic in the scene, so sliders re-
 with no network call. Claude-written lessons get one corrective retry on a diagram error and are
 flagged `generated`; the renderer shows a small "AI-generated" marker.
 
+**Beat animation.** Each beat may `animate` up to three sliders (`{param, to, seconds}`), and the
+motion plays while that beat is spoken (or when the beat is selected), so the picture shows what the
+sentence says. The compiler resolves each move's start from earlier beats, rejects moves outside a
+slider's range or out of view, adds short holds so quiet beats keep the state earlier beats left, and
+requires at least one animated beat whenever a lesson has sliders. Plans carry the result as
+`beats[].animations: [{binding, start, end, seconds}]`. The free "Sweep freely" control remains for
+exploration.
+
+**3D models.** `backend/config/models.json` is a vetted catalog (NASA public-domain spacecraft;
+CC0/CC BY Khronos samples such as an animated fox and a truck). Lessons place them with the
+`model3d` primitive by catalog id only; position, size and rotation are expressions, so sliders and
+beat animations move the object itself, and optional clips (fox Walk/Run, truck Wheels) play.
+`backend/app/models.py` downloads each file once, verifies its pinned sha256, and caches it in
+`backend/model_cache/` (override with `LUCID_MODEL_CACHE`); `GET /api/models` lists the catalog and
+`GET /api/models/{id}.glb` serves a file same-origin with an immutable cache header. The browser never
+contacts a third party. `backend.tools.dev` sets `LUCID_MODEL_PREFETCH=1` to download the whole
+catalog at startup; otherwise a model downloads on first use. CC BY credits appear under the scene.
+
 **Learning goals.** `backend/app/goals.py` holds an authored 16-topic curriculum (vectors,
 graph algorithms, calculus) with descriptions, one quiz question per topic and "builds on" links
 with similarity. Startup syncs it into the God Brain: additive and idempotent, reusing concepts
@@ -185,7 +204,7 @@ one end is well understood, so a loose shortcut would let routes skip prerequisi
 simulates mastery on every advanced topic and asserts routes climb level by level.
 
 **Lesson planner.** With `ANTHROPIC_API_KEY` set, `backend/app/planner.py` asks Claude
-(`LUCID_PLANNER_MODEL`, default `claude-opus-5-5`, low effort, structured output) to pick a
+(`LUCID_PLANNER_MODEL`, default `claude-sonnet-5-5`, low effort, structured output) to pick a
 recipe and parameters for the learner's request, e.g. their own graph or function. Claude never
 writes coordinates or narration. Invalid parameters get one corrective retry; a second failure,
 refusal, timeout (12 s per call) or outage falls back to the keyword router (dot product/

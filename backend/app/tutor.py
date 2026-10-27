@@ -5,9 +5,13 @@ route is never shown or spoken; the tutor just teaches the next concept on it. S
 only through graded answers (diagnostic or check questions), never from conversation alone.
 Confusion triggers a deeper explanation, or a detour to a prerequisite the author identifies;
 concepts the graph lacks are created through the engine's proposal API with provenance.
+
+Turns are conversational (see conversation.py): a short reaction, one idea, one hand-off
+question. Questions are open first; options are a hint, never the default.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 from collections import deque
@@ -17,21 +21,31 @@ from uuid import uuid4
 
 from memory_graph import AmbiguousConcept, NotFound
 
-from .author import Check, grade_locally
+from .author import UNSURE, Check, grade_locally
+from .conversation import PHRASES, Phrasing, echo, glue, joined, options_redundant
 from .diagrams import AUTHORED, compile_lesson
 from .goals import KNOWN, GoalError, Topic, _wrap, concept_card
 from .learning import LessonPlan, TeachingBeat, plan as authored_plan
 from .library import LessonLibrary
+from .memory import LearnerMemory
 from .reviews import Reviews
 from .scene import Label, MAX_OBJECTS, Node
+from .screen import describe_screen
 
 DIAGNOSTIC_SCORES = {"correct": 7.0, "partly": 4.0, "wrong": 2.0, "unsure": 1.0}
 CHECK_SCORES = {"correct": 8.0, "partly": 5.0, "wrong": 3.0, "unsure": 2.0}
 MAX_QUESTIONS = 8  # Starting-check budget; the frontier search usually needs far fewer.
 MAX_CLARIFY = 2  # Deeper explanations per concept before moving on.
-ACTIONS = ("goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup", "skip")
+ACTIONS = ("goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup",
+           "skip", "hint")
 REVISIT = re.compile(r"\b(review|revisit|go deeper|learn more|tell me more|teach me more|more detail|again)\b", re.I)
-# First option is correct. These are tiny transfer/prediction tasks, not copied explanations.
+# A short "yes" to "Ready for the next piece?" moves on; it is never a topic to look up.
+READY = re.compile(r"^\W*(yes|yeah|yep|sure|ok(ay)?|ready|go on|go ahead|next|keep going|let'?s go|continue)\b"
+                   r"[\w\s,'!.]{0,24}$", re.I)
+# Replies to "Have you worked with X before?"; anything else counts as neutral.
+NEW_TO_IT = re.compile(r"\b(no|nope|never|not really|new to|haven'?t)\b", re.I)
+FAMILIAR = re.compile(r"\b(yes|yeah|yep|some|a (?:bit|little)|familiar|i have|i know|seen it|used it|kind of|sort of)\b", re.I)
+# First option is correct (choices are shuffled when asked). Tiny transfer/prediction tasks.
 PREDICTIONS = {
     "vectors": ("If an arrow points the opposite way, which property changes?", "direction", "neither property"),
     "vector_length": ("In a right triangle, is the hypotenuse longer or shorter than either leg?", "longer", "shorter"),
@@ -55,7 +69,7 @@ PREDICTIONS = {
 @dataclass
 class Question:
     concept: str
-    kind: str  # "diagnostic" or "check"
+    kind: str  # experience, diagnostic, check, prediction(_choice), synthesis, teachback, recall(_choice)
     prompt: str
     expected: str
     choices: tuple[str, ...] | None = None
@@ -63,13 +77,23 @@ class Question:
     related: str | None = None
     event_id: str = field(default_factory=lambda: uuid4().hex)
     retries: int = 0
+    offered: tuple[str, ...] | None = None  # Choices read out and shown: only as a hint.
+    hints: int = 0
+
+    def __post_init__(self):
+        # "Which function is continuous?" makes no sense without its options.
+        if self.choices and self.offered is None and re.match(r"\s*which\b", self.prompt, re.I):
+            self.offered = self.choices
+
+    @property
+    def answer(self):
+        return self.choices[self.correct] if self.choices else self.expected
 
     @property
     def spoken(self):
-        if not self.choices:
+        if not self.offered or options_redundant(self.prompt, self.offered):
             return self.prompt
-        options = ", ".join(self.choices[:-1]) + ", or " + self.choices[-1]
-        return f"{self.prompt} Is it {options}?"
+        return f"{self.prompt} {PHRASES['options'][0].format(options=joined(self.offered))}"
 
 
 @dataclass
@@ -89,10 +113,17 @@ class Session:
     active_plan: LessonPlan | None = None
     remaining_beats: list = field(default_factory=list)
     taught_beats: list = field(default_factory=list)
-    final_question: Question | None = None
     warmup_queue: deque = field(default_factory=deque)
     warmup_active: bool = False
     resume_question: Question | None = None
+    # What the learner sees, for the author model: the displayed scene (from the service), the
+    # client's view (moved sliders, active step, animation, VR), spoken steps and recent turns.
+    screen: list = field(default_factory=list)
+    view: dict | None = None
+    shown_beats: list = field(default_factory=list)
+    exchanges: deque = field(default_factory=lambda: deque(maxlen=6))
+    said: dict = field(default_factory=dict)  # Last phrase variant per situation, so none repeats.
+    bridged: bool = False  # The first lesson after the check opens from what the learner knows.
     validate_write: Callable[[], None] | None = None  # Service epoch guard, outside provider calls.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -107,27 +138,41 @@ def card(title, lines) -> LessonPlan:
 
 
 class Tutor:
-    def __init__(self, graph, goals, planner, author=None, active_learning=True):
+    def __init__(self, graph, goals, planner, author=None, active_learning=True, phrasing=None):
         self.graph, self.goals, self.planner, self.author = graph, goals, planner, author
         self.curriculum = goals.curriculum
         self.library = LessonLibrary(graph)
+        self.memory = LearnerMemory(graph)
         self.reviews = Reviews(graph)
         self.active_learning = active_learning
+        # LUCID_TUTOR_VARIETY=0 fixes the wording (first variant, seeded shuffles) for tests and demos.
+        variety = os.getenv("LUCID_TUTOR_VARIETY", "1") != "0"
+        self.phrasing = phrasing or Phrasing(variety=variety, seed=None if variety else 0)
+
+    def _say(self, s, key, **values):
+        return self.phrasing.say(key, s.said, **values)
 
     @property
     def interactive(self):
         return self.active_learning and self.author is not None and hasattr(self.author, "practice")
 
     # ---- entry point -----------------------------------------------------------------------
-    def act(self, session: Session, user, action, text="") -> LessonPlan:
+    def act(self, session: Session, user, action, text="", view=None, screen=None) -> LessonPlan:
         if action not in ACTIONS:
             raise ValueError("Unknown tutor action")
         text = text.strip()
+        session.view = view
+        if screen is not None:
+            session.screen = list(screen)
         # A request for more teaching is never a quiz answer, even if a check is pending.
         if action in ("recall", "warmup"):
             plan = self._recall(session, user, text, warmup=action == "warmup")
         elif action == "skip":
             plan = self._skip(session, user)
+        elif action == "hint":
+            plan = self._hint(session, user)
+        elif action in ("answer", "question") and not session.question and READY.match(text):
+            plan = self._continue(session, user)
         elif action in ("review", "deeper") or (action in ("answer", "question", "continue") and REVISIT.search(text)):
             plan = self._revisit(session, user, text, action == "review")
         elif action == "goal":
@@ -153,7 +198,16 @@ class Tutor:
             session.viewed = plan.concept_id
         if context_target:
             plan.graph_context = self._context(user, session, context_target)
+        session.shown_beats = [beat.say_text for beat in plan.beats]
+        session.screen = list(plan.nodes)
+        session.exchanges.append({"learner": text[:300], "action": action,
+                                  "tutor": " ".join(session.shown_beats)[:500]})
         return plan
+
+    def _screen(self, s):
+        """The learner's screen as the author model sees it (see screen.describe_screen)."""
+        return describe_screen(s.screen, s.shown_beats, s.view,
+                               question=s.question.spoken if s.question else None, exchanges=list(s.exchanges))
 
     # ---- goal and starting check -----------------------------------------------------------
     def _goal(self, s, user, text):
@@ -166,12 +220,28 @@ class Tutor:
         s.viewed = None
         s.active_plan, s.remaining_beats, s.taught_beats = None, [], []
         s.warmup_active, s.warmup_queue, s.resume_question = False, deque(), None
-        s.mode = "diagnosing"
+        s.mode, s.bridged = "diagnosing", False
         members = self.graph.human(user).snapshot().nodes
         if target in members and members[target].understanding >= KNOWN:
             return self._revisit(s, user, text, review=False)
-        return self._next_question(s, user, [f"Let's work toward {self._name(target)}. First, a few quick "
-                                             "questions so I know where to start."])
+        # The check opens as a conversation: how familiar is this, then a few quick probes.
+        name = self._name(target)
+        s.question = Question(target, "experience", self._say(s, "experience", topic=name), "")
+        return self._ask_card(s.question, [self._say(s, "goal", topic=name)])
+
+    def _experience(self, s, user, q, text):
+        """The learner's own account shapes the lead-in; only "never seen it" counts as evidence."""
+        if NEW_TO_IT.search(text):
+            if s.validate_write:
+                s.validate_write()
+            # Same evidence as answering "not sure" to the goal's own question, without asking it.
+            self.goals.record(user, q.concept, DIAGNOSTIC_SCORES["unsure"], "voice_diagnostic",
+                              {"question": q.prompt, "verdict": "unsure", "self_report": text[:200]},
+                              link_missing=not self.interactive)
+            s.asked.add(q.concept)
+            self._expand(s, q.concept)
+            return self._next_question(s, user, [self._say(s, "probe_new")])
+        return self._next_question(s, user, [self._say(s, "probe_known" if FAMILIAR.search(text) else "probe")])
 
     def _next_question(self, s, user, intro):
         """Frontier search from the goal: a correct answer stops the search along that branch."""
@@ -191,36 +261,49 @@ class Tutor:
                 s.question = question
                 return self._ask_card(question, intro)
         s.question = None
-        return self._teach_next(s, user, intro + ["Thanks, that tells me where to start."])
+        return self._teach_next(s, user, intro)
 
     def _expand(self, s, concept):
         level = {self.curriculum.ids[t.key]: t.level for t in self.curriculum.topics}
         for neighbor in sorted(self.graph.god.neighbors(concept), key=lambda n: -level.get(n, 2)):
+            if neighbor in level and concept in level and level[neighbor] > level[concept]:
+                continue  # Missing an idea says nothing about more advanced ones: only probe downward.
             if neighbor not in s.asked and neighbor not in s.queue:
                 s.queue.append(neighbor)
 
     # ---- answers ---------------------------------------------------------------------------
     def _answer(self, s, user, text):
         q, s.question = s.question, None
+        if q.kind == "experience":
+            return self._experience(s, user, q, text)
         if q.kind in ("prediction", "synthesis", "teachback", "recall"):
             return self._retrieval_answer(s, user, q, text)
         verdict, feedback = self._grade(q, text)
+        if (verdict == "unsure" and q.choices and not q.offered and text.strip()
+                and not UNSURE.search(text.casefold()) and not options_redundant(q.prompt, q.choices)):
+            # An answer that matched no choice isn't graded: offer the options instead.
+            return self._scaffold(s, q)
         if s.validate_write:
             s.validate_write()
         self.reviews.log_attempt(user, q.concept, q.kind, CHECK_SCORES[verdict],
                                 f"{q.event_id}:{q.retries}", {"verdict": verdict, "question": q.prompt})
-        if q.kind == "prediction_choice":
-            if verdict not in ("correct", "partly") and q.retries == 0:
-                q.retries += 1
-                s.question = q
-                return self._ask_card(q, [feedback, "Try this small step once more."])
-            return self._small_step(s, [feedback])
+        right = verdict in ("correct", "partly")
         if q.kind == "diagnostic":
+            # The starting check reacts neutrally and never reveals: the lessons will teach it.
             self.goals.record(user, q.concept, DIAGNOSTIC_SCORES[verdict], "voice_diagnostic",
                               {"question": q.prompt, "verdict": verdict}, link_missing=not self.interactive)
             if verdict != "correct":
                 self._expand(s, q.concept)
-            return self._next_question(s, user, [feedback])
+            reaction = self._say(s, "correct", echo=echo(text, q.answer)) if verdict == "correct" else self._say(s, "unsure")
+            return self._next_question(s, user, [reaction])
+        if not right and q.retries == 0 and self._narrow(q, text):
+            # First miss: a narrower question to try again, without giving the answer away.
+            q.retries += 1
+            s.question = q
+            return self._reask(s, q, [self._say(s, verdict), self._say(s, "narrow")])
+        reaction = self._react(s, q, verdict, text, feedback)
+        if q.kind == "prediction_choice":
+            return self._small_step(s, [reaction])
         self.goals.record(user, q.concept, CHECK_SCORES[verdict], "voice_check",
                           {"question": q.prompt, "verdict": verdict}, previous=s.previous if not self.interactive else None,
                           link_missing=not self.interactive)
@@ -228,45 +311,103 @@ class Tutor:
             self.reviews.record(user, q.concept, CHECK_SCORES[verdict], q.event_id,
                                 {"kind": q.kind, "verdict": verdict})
         if q.kind == "recall_choice" and s.warmup_active:
-            return self._next_recall(s, user, [feedback])
-        if verdict in ("correct", "partly"):
+            return self._next_recall(s, user, [reaction])
+        if right:
             if self.interactive:
-                return self._consolidate(s, user, q.concept, [feedback])
+                return self._consolidate(s, user, q.concept, [reaction])
             s.covered.add(q.concept)
             s.previous = q.concept
             if s.detours:
                 resume = s.detours.pop()
-                return self._teach(s, user, resume, [feedback, f"Now, back to {self._name(resume)}."])
-            return self._teach_next(s, user, [feedback])
+                return self._teach(s, user, resume, [reaction, self._say(s, "resume", topic=self._name(resume))])
+            return self._teach_next(s, user, [reaction])
         s.attempts[q.concept] = s.attempts.get(q.concept, 0) + 1
         if s.attempts[q.concept] > MAX_CLARIFY:
             s.covered.add(q.concept)
-            return self._teach_next(s, user, [feedback, "Let's keep going, and come back to this later."])
-        return self._clarify(s, user, q.concept, f"They answered {text!r} to the question: {q.prompt}", [feedback])
+            return self._teach_next(s, user, [reaction, self._say(s, "move_on")])
+        return self._clarify(s, user, q.concept, f"They answered {text!r} to the question: {q.prompt}", [reaction])
+
+    def _react(self, s, q, verdict, text, feedback):
+        """One line: a short reaction, plus the answer when it was missed (never followed by a retry)."""
+        if verdict == "correct":
+            return self._say(s, "correct", echo=echo(text, q.answer))
+        if not q.choices and self.author and feedback:
+            return feedback.strip()[:300]  # The grader's specific feedback on an open answer.
+        if verdict == "partly":
+            return self._say(s, "partly")
+        return f"{self._say(s, verdict)} {self._say(s, 'reveal', answer=q.answer)}"
+
+    def _scaffold(self, s, q):
+        q.offered = q.choices
+        s.question = q
+        return self._reask(s, q, [self._say(s, "scaffold")])
+
+    def _narrow(self, q, text=""):
+        """Two options instead of many: the correct one and one the learner didn't just pick."""
+        if not q.choices or len(q.offered or q.choices) <= 2:
+            return False
+        said = text.casefold()
+        others = [c for c in (q.offered or q.choices) if c != q.answer and c.casefold() not in said]
+        if not others:
+            return False
+        q.offered = tuple(self.phrasing.shuffle([q.answer, others[0]]))
+        return True
 
     def _grade(self, q, text):
-        if self.author and not q.choices:
+        # Letters ("B") refer to the options as offered; open answers match any choice.
+        choices = q.offered or q.choices
+        correct = choices.index(q.answer) if choices else None
+        if self.author and not choices:
             graded = self.author.grade(q.prompt, q.expected, text)
             if graded:
                 return graded
-        if self.author and q.choices and not grade_locally(text, q.expected, q.choices, q.correct)[0] in ("correct", "wrong"):
-            graded = self.author.grade(q.prompt, q.expected, text, q.choices)
+        if self.author and choices and not grade_locally(text, q.expected, choices, correct)[0] in ("correct", "wrong"):
+            graded = self.author.grade(q.prompt, q.expected, text, choices)
             if graded:
                 return graded
-        return grade_locally(text, q.expected, q.choices, q.correct)
+        return grade_locally(text, q.expected, choices, correct)
+
+    def _hint(self, s, user):
+        """The hint ladder: options, then two options, then the answer. A hint is never graded."""
+        q = s.question
+        if q is None:
+            if s.active_plan and s.taught_beats:  # Nothing to answer: replay the step just taught.
+                plan = self._shown_plan(s)
+                plan.beats = [TeachingBeat(beat_id="hint", say_text=s.taught_beats[-1], focus_ids=[])]
+                return self._compose([self._say(s, "again")], plan, None, ready=self._say(s, "ready"))
+            return self._card(s, "Hint", [self._say(s, "no_question"), self._say(s, "idle")])
+        if q.kind == "experience":
+            s.question = None
+            return self._experience(s, user, q, "")
+        if q.choices:
+            if not q.offered and not options_redundant(q.prompt, q.choices):
+                s.question = None
+                return self._scaffold(s, q)
+            if q.kind != "diagnostic" and self._narrow(q):
+                return self._reask(s, q, [self._say(s, "narrow")])
+            return self._answer(s, user, "not sure")
+        if q.hints == 0:
+            # Open questions: point back at what was just taught (the topic's summary for recall).
+            q.hints += 1
+            context = s.taught_beats[-1] if q.kind == "prediction" and s.taught_beats else (
+                self._description(q.concept).split(". ")[0].rstrip(".") + ".")
+            if q.kind not in ("recall", "teachback", "synthesis"):
+                return self._reask(s, q, [self._say(s, "hint"), context])
+        if q.kind == "prediction":
+            # Its expected answer is a grading rubric, not something to read out: the next step shows it.
+            s.question = None
+            return self._small_step(s, [self._say(s, "see_next")]) if s.remaining_beats else self._continue(s, user)
+        return self._skip(s, user)
 
     # ---- teaching --------------------------------------------------------------------------
     def _teach_next(self, s, user, intro):
         if s.target is None:
             s.mode = "idle"
-            return self._card(s, "What would you like to learn?", intro + ["Tell me what you'd like to learn."])
+            return self._card(s, "What would you like to learn?", intro + [self._say(s, "idle")])
         route = self.goals.route(user, s.target)  # Silent: only its next step is ever used.
         if route["status"] == "known":
-            if self.interactive and s.target not in s.covered:
-                s.current, s.mode = s.target, "checking"
-                return self._consolidate(s, user, s.target, intro)
             s.mode = "done"
-            return self._finish(s, user, intro + [f"You've got {self._name(s.target)}. Nicely done."])
+            return self._finish(s, user, intro + [self._say(s, "goal_reached", topic=self._name(s.target))])
         step = next((step["id"] for step in route["steps"] if not step["known"] and step["id"] not in s.covered), None)
         if self.interactive and route["total_cost"] is None:
             context = self.goals.teaching_context(user, s.target)
@@ -276,37 +417,64 @@ class Tutor:
             step = s.target
         if step is None:
             s.mode = "done"
-            return self._finish(s, user, intro + [f"We've worked through everything on the way to "
-                                                  f"{self._name(s.target)}. Ask me anything, or set a new goal."])
-        return self._teach(s, user, step, intro + [f"Next, let's look at {self._name(step)}."])
+            return self._finish(s, user, intro + [self._say(s, "route_done", topic=self._name(s.target))])
+        return self._teach(s, user, step, intro + [self._transition(s, route, step)])
+
+    def _transition(self, s, route, step):
+        """"Now, X." The first lesson instead opens from the known idea the route starts at."""
+        name = self._name(step)
+        if s.bridged:
+            return self._say(s, "next", topic=name)
+        s.bridged = True
+        ids = [st["id"] for st in route["steps"]]
+        before = route["steps"][ids.index(step) - 1] if step in ids and ids.index(step) > 0 else None
+        if before and before["known"]:
+            return self._say(s, "bridge_known", known=before["name"])
+        return self._say(s, "bridge_new", topic=name)
 
     def _teach(self, s, user, concept, intro):
         s.current, s.mode = concept, "checking"
         s.recent.append(self._name(concept))
-        plan, check = self._lesson(concept, user, s)
+        plan, _ = self._lesson(concept, user, s)
         plan.concept_id = concept
-        s.question = self._as_question(concept, check) or self._question(concept, "check")
         return self._activate(s, plan, intro)
 
     def _activate(self, s, plan, intro):
+        """Start a lesson. It ends without a check question: Continue moves on to the next concept."""
+        s.question = None
         if self.active_learning and len(plan.beats) > 1:
             s.active_plan = plan.model_copy(deep=True)
-            s.remaining_beats, s.taught_beats, s.final_question = list(plan.beats), [], s.question
+            s.remaining_beats, s.taught_beats = list(plan.beats), []
             return self._small_step(s, intro)
-        return self._compose(intro, plan, s.question)
+        return self._compose(intro, plan, None, ready=self._say(s, "ready"))
+
+    def _shown_plan(self, s):
+        """The lesson diagram as revealed so far, without spoken steps."""
+        plan = s.active_plan.model_copy(deep=True)
+        plan.beats = []
+        if s.remaining_beats:
+            revealed = {"title", "axes"} | {node.id for node in plan.nodes if node.content.primitive == "slider"}
+            revealed.update(node_id for b in s.active_plan.beats[:len(s.taught_beats)] for node_id in b.focus_ids)
+            plan.nodes = [node.model_copy(update={"visible": node.id in revealed}) for node in plan.nodes]
+        return plan
+
+    def _reask(self, s, q, intro):
+        """Ask again: over the lesson diagram mid-lesson, otherwise on a question card."""
+        if q.kind.startswith("prediction") and s.active_plan:
+            return self._compose(intro, self._shown_plan(s), q)
+        return self._ask_card(q, intro)
 
     def _small_step(self, s, intro):
         """Reveal one short beat, then wait for an actual learner response."""
         beat = s.remaining_beats.pop(0)
         s.taught_beats.append(beat.say_text)
-        plan = s.active_plan.model_copy(deep=True)
-        plan.beats = [beat]
         if not s.remaining_beats:
-            s.question = s.final_question
-            return self._compose(intro, plan, s.question)
-        revealed = {"title", "axes"} | {node.id for node in plan.nodes if node.content.primitive == "slider"}
-        revealed.update(node_id for b in s.active_plan.beats[:len(s.taught_beats)] for node_id in b.focus_ids)
-        plan.nodes = [node.model_copy(update={"visible": node.id in revealed}) for node in plan.nodes]
+            plan = s.active_plan.model_copy(deep=True)
+            plan.beats = [beat]
+            s.question = None
+            return self._compose(intro, plan, None, ready=self._say(s, "ready"))  # The learner sets the pace.
+        plan = self._shown_plan(s)
+        plan.beats = [beat]
         check = self.author.practice("prediction", self._name(s.current), self._description(s.current),
                                      covered=list(s.taught_beats)) if self.interactive else None
         if check:
@@ -317,12 +485,12 @@ class Tutor:
             prompt, correct, wrong = PREDICTIONS[topic.key]
             # One authored prediction per concept; later steps pause for self-explanation.
             if len(s.taught_beats) == 1:
-                s.question = Question(s.current, "prediction_choice", prompt, correct, (correct, wrong), 0)
+                choices = tuple(self.phrasing.shuffle((correct, wrong)))
+                s.question = Question(s.current, "prediction_choice", prompt, correct, choices, choices.index(correct))
                 return self._compose(intro, plan, s.question)
         # Never turn a provider outage into a fake grade or a long autoplay lesson.
         s.question = None
-        plan.beats.append(TeachingBeat(beat_id="pause", say_text="Pause and explain that step to yourself. "
-                                      "Choose Continue when you're ready for the next small step.", focus_ids=[]))
+        plan.beats.append(TeachingBeat(beat_id="pause", say_text=self._say(s, "pause"), focus_ids=[]))
         return self._compose(intro, plan, None)
 
     def _consolidate(self, s, user, concept, intro):
@@ -362,8 +530,7 @@ class Tutor:
             s.validate_write()
         if graded is None:
             s.question = q
-            return self._ask_card(q, ["I couldn't evaluate that answer right now. Your mastery hasn't changed. "
-                                      "Try again, or choose Skip."])
+            return self._ask_card(q, [self._say(s, "grader_down")])  # Nothing is scored.
         evidence = {"kind": q.kind, "question": q.prompt, "rubric": q.expected,
                     "demonstrated": graded.demonstrated, "missing": graded.missing,
                     "model": self.author.model, "related": q.related}
@@ -375,9 +542,7 @@ class Tutor:
             if graded.score < 5 and q.retries == 0:
                 q.retries += 1
                 s.question = q
-                plan = s.active_plan.model_copy(deep=True)
-                plan.beats = []
-                return self._compose([feedback, "Try explaining the reasoning once more in your own words."], plan, q)
+                return self._reask(s, q, [feedback, self._say(s, "explain_again")])
             if s.remaining_beats:
                 return self._small_step(s, [feedback])
             return self._consolidate(s, user, q.concept, [feedback])
@@ -407,8 +572,7 @@ class Tutor:
         if graded.score < 5 and q.kind in ("teachback", "recall"):
             s.covered.add(q.concept)
             s.mode = "done"
-            return self._card(s, "A useful gap to work on", [feedback,
-                "This needs another try after a short break. Review the explanation, or choose a new goal."])
+            return self._card(s, "A useful gap to work on", [feedback, self._say(s, "gap")])
         s.covered.add(q.concept)
         s.previous = q.concept
         if s.detours:
@@ -417,7 +581,7 @@ class Tutor:
 
     def _recall(self, s, user, text, warmup=False):
         if s.warmup_active:
-            return self._ask_card(s.question, ["Finish this recall attempt, or choose Skip."]) if s.question else self._next_recall(s, user, [])
+            return self._ask_card(s.question, [self._say(s, "recall_wait")]) if s.question else self._next_recall(s, user, [])
         if warmup:
             topics = self.reviews.suggestions(user)["topics"]
             due = [t["concept_id"] for t in topics if t["due"]]
@@ -432,19 +596,18 @@ class Tutor:
             concept = self._find(text) if text else s.viewed or s.current or s.target
             concepts = [concept] if concept else []
         if not concepts:
-            return self._card(s, "Choose your learning day", ["No reviews are due yet. Choose a new topic, "
-                                                             "or name a topic for active recall."])
+            return self._card(s, "Choose your learning day", [self._say(s, "nothing_due"), self._say(s, "idle")])
         s.resume_question, s.warmup_queue, s.warmup_active = s.question, deque(concepts), True
-        return self._next_recall(s, user, ["Let's retrieve before looking at the explanation. Take your time."])
+        return self._next_recall(s, user, [self._say(s, "recall_start")])
 
     def _next_recall(self, s, user, intro):
         if not s.warmup_queue:
             s.warmup_active = False
             s.question, s.resume_question = s.resume_question, None
             if s.question:
-                return self._ask_card(s.question, intro + ["Warm-up complete. Back to where you left off."])
+                return self._ask_card(s.question, intro + [self._say(s, "back_to_it")])
             s.mode = "done"
-            return self._card(s, "Warm-up complete", intro + ["Choose something new to learn, or stop here for today."])
+            return self._card(s, "Warm-up complete", intro + [self._say(s, "warmup_done"), self._say(s, "stop_or_new")])
         concept = s.warmup_queue.popleft()
         check = self.author.practice("recall", self._name(concept), self._description(concept)) if self.interactive else None
         if check:
@@ -462,13 +625,14 @@ class Tutor:
 
     def _skip(self, s, user):
         q, s.question = s.question, None
+        # Skipping never scores anything or changes the review schedule.
         if s.warmup_active:
-            return self._next_recall(s, user, ["Skipped. Your mastery and review schedule are unchanged."])
-        if q and q.kind == "prediction" and s.remaining_beats:
-            return self._small_step(s, ["Let's try the next small step."])
+            return self._next_recall(s, user, [self._say(s, "skipped")])
+        if q and q.kind.startswith("prediction") and s.remaining_beats:
+            return self._small_step(s, [self._say(s, "skip_step")])
         if q:
             s.covered.add(q.concept)
-        return self._teach_next(s, user, ["Skipped. No mastery awarded."])
+        return self._teach_next(s, user, [self._say(s, "skipped")])
 
     def _lesson(self, concept, user, s, request=None):
         query = (request or self._name(concept)).casefold()
@@ -491,7 +655,8 @@ class Tutor:
                 return saved
         if self.author:
             context = self._context(user, s, concept)
-            written = self.author.explain(self._name(concept), self._description(concept), context, request)
+            written = self.author.explain(self._name(concept), self._description(concept), context, request,
+                                          screen=self._screen(s), memory=self.memory.for_learner(user))
             if written:
                 written.plan.graph_context = context
                 self._remember(user, concept, written)
@@ -509,7 +674,8 @@ class Tutor:
 
     def _clarify(self, s, user, concept, request, intro):
         written = self.author.explain(self._name(concept), self._description(concept), self._context(user, s),
-                                      request) if self.author else None
+                                      request, screen=self._screen(s),
+                                      memory=self.memory.for_learner(user)) if self.author else None
         if written and written.prerequisite:
             prerequisite = self._find(written.prerequisite, create=True, link_to=concept)
             members = self.graph.human(user).snapshot().nodes
@@ -517,15 +683,15 @@ class Tutor:
                     prerequisite not in members or members[prerequisite].understanding < KNOWN):
                 s.detours.append(concept)
                 return self._teach(s, user, prerequisite, intro + [
-                    f"I think the missing piece is {self._name(prerequisite)}. Let's look at that first."])
+                    self._say(s, "detour", topic=self._name(prerequisite))])
         s.current, s.mode = concept, "checking"
         if written:
             self._remember(user, concept, written)
-            plan, check = written.plan, written.check
+            plan = written.plan
+            intro = intro + [self._say(s, "confused")]
         else:
-            plan, check = self._lesson(concept, user, s)[0], None
-            intro = intro + ["Let's slow down and go through it again."]
-        s.question = self._as_question(concept, check) or self._question(concept, "check")
+            plan = self._lesson(concept, user, s)[0]
+            intro = intro + [self._say(s, "slow_down")]
         plan.concept_id = concept
         return self._activate(s, plan, intro)
 
@@ -538,8 +704,7 @@ class Tutor:
         if s.current is None:
             return self._ask(s, user, text or "Can you explain that more simply?")
         # Asking for help never counts against the learner; only wrong answers use up attempts.
-        return self._clarify(s, user, s.current, text or "I don't understand this part.",
-                             ["Good question. Let's dig into that."])
+        return self._clarify(s, user, s.current, text or "I don't understand this part.", [])
 
     def _ask(self, s, user, text, guided=False):
         """A free question: answered with a diagram; any pending check question stays pending."""
@@ -551,12 +716,11 @@ class Tutor:
             topic = self.curriculum.by_id.get(concept)
             simple = re.sub(r"^(?:explain|teach me|what is|what are|learn)\s+(?:the\s+)?", "", text.casefold()).rstrip("?.! ")
             canonical = topic and simple in (topic.name.casefold(), *topic.aliases)
-            plan, check = self._lesson(concept, user, s, request=None if canonical else text)
+            plan, _ = self._lesson(concept, user, s, request=None if canonical else text)
             plan.concept_id = concept
             if guided:
                 s.target, s.current, s.mode = concept, concept, "checking"
                 s.covered, s.previous, s.detours = set(), None, []
-                s.question = self._as_question(concept, check) or self._question(concept, "check")
                 return self._activate(s, plan, [])
             return self._remind(s, plan, [])
         return self._remind(s, self.goals.tag(text, self.planner(text)), [])
@@ -577,63 +741,70 @@ class Tutor:
         s.recent.append(self._name(concept))
         request = text or ("Review this with a fresh example." if review else
                            "Go deeper, building on what I already know with a new example and diagram.")
-        plan, check = self._lesson(concept, user, s, request=request)
+        plan, _ = self._lesson(concept, user, s, request=request)
         plan.concept_id = concept
-        s.question = self._as_question(concept, check) or self._question(concept, "check")
-        return self._activate(s, plan, [f"Let's {'review' if review else 'go further with'} {self._name(concept)}."])
+        return self._activate(s, plan, [self._say(s, "review" if review else "deeper", topic=self._name(concept))])
 
     def _continue(self, s, user):
         if s.question:
-            return self._ask_card(s.question, ["Here's the question again."])
+            return self._reask(s, s.question, [self._say(s, "again")])
         if s.remaining_beats and s.active_plan:
             return self._small_step(s, [])
         if s.mode == "checking" and s.current:
             s.covered.add(s.current)
+            if s.detours:  # A finished prerequisite returns to the lesson that needed it.
+                resume = s.detours.pop()
+                return self._teach(s, user, resume, [self._say(s, "resume", topic=self._name(resume))])
             return self._teach_next(s, user, [])
         if s.mode == "done" and s.target:
             return self._revisit(s, user, "", review=False)
-        return self._card(s, "What would you like to learn?", ["Tell me what you'd like to learn, and I'll take it from there."])
+        return self._card(s, "What would you like to learn?", [self._say(s, "idle")])
 
     def _finish(self, s, user, intro):
         topic = self.curriculum.by_id.get(s.target)
         plan = compile_lesson(AUTHORED[topic.key]) if topic and topic.key in AUTHORED else (
             self.planner(topic.recipe) if topic and topic.recipe else card(self._name(s.target), []))
-        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(intro)] + [
-            TeachingBeat(beat_id="next", say_text="What would you like to learn next?", focus_ids=[])]
+        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(glue(intro))] + [
+            TeachingBeat(beat_id="next", say_text=self._say(s, "what_next"), focus_ids=[])]
         return plan
 
     # ---- plans -----------------------------------------------------------------------------
-    def _compose(self, intro, plan: LessonPlan, question: Question | None):
-        beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(intro) if text]
+    # Every turn: a short reaction and transition (at most two "glue" lines, which the voice may
+    # rephrase), the lesson step, then one hand-off spoken last, then silence.
+    def _compose(self, intro, plan: LessonPlan, question: Question | None, ready: str | None = None):
+        beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(glue(intro))]
         beats += [beat.model_copy(update={"beat_id": f"l{i}"}) for i, beat in enumerate(plan.beats)]
         if question:
-            beats.append(TeachingBeat(beat_id="check", say_text=f"Quick check: {question.spoken}", focus_ids=[]))
+            beats.append(TeachingBeat(beat_id="check", say_text=question.spoken, focus_ids=[]))
+        elif ready:
+            beats.append(TeachingBeat(beat_id="ready", say_text=ready, focus_ids=[]))
         plan.beats = beats
         return plan
 
     def _ask_card(self, question: Question, intro):
-        lines = [question.prompt] + ([f"{'ABCD'[i]}. {c}" for i, c in enumerate(question.choices)] if question.choices else [])
+        offered = question.offered or ()
+        lines = [question.prompt] + [f"{'ABCD'[i]}. {c}" for i, c in enumerate(offered)]
         plan = card("Quick question", [])
         y = 2.4
         for i, line in enumerate(line for text in lines for line in _wrap(text)):
             if len(plan.nodes) < MAX_OBJECTS:
                 plan.nodes.append(Node(id=f"q{i}", content=Label(text=line, position=[0.0, round(y, 2)])))
                 y -= 0.9
-        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(intro) if text]
+        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(glue(intro))]
         plan.beats.append(TeachingBeat(beat_id="question", say_text=question.spoken,
                                        focus_ids=[n.id for n in plan.nodes if n.id.startswith("q")]))
         return plan
 
     def _card(self, s, title, lines):
         plan = card(title, [])
-        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=line, focus_ids=[]) for i, line in enumerate(lines)]
+        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=line, focus_ids=[]) for i, line in enumerate(glue(lines))]
         return plan
 
     def _remind(self, s, plan, intro):
         plan = self._compose(intro, plan, None)
         if s.question:
-            plan.beats.append(TeachingBeat(beat_id="reminder", say_text="Whenever you're ready, here's the "
-                                           f"question again: {s.question.spoken}", focus_ids=[]))
+            plan.beats.append(TeachingBeat(beat_id="reminder", say_text=f"{self._say(s, 'again')} {s.question.spoken}",
+                                           focus_ids=[]))
         return plan
 
     # ---- questions, names and concepts -----------------------------------------------------
@@ -644,15 +815,14 @@ class Tutor:
             if check:
                 return Question(concept, kind, check.question, check.expected_answer)
         if topic and topic.question:
-            return Question(concept, kind, topic.question, topic.choices[topic.answer], topic.choices, topic.answer)
+            answer = topic.choices[topic.answer]
+            choices = tuple(self.phrasing.shuffle(topic.choices))  # The answer isn't always first.
+            return Question(concept, kind, topic.question, answer, choices, choices.index(answer))
         if self.author:
             check = self.author.question(self._name(concept), self._description(concept))
             if check:
                 return Question(concept, kind, check.question, check.expected_answer)
         return None
-
-    def _as_question(self, concept, check: Check | None):
-        return Question(concept, "check", check.question, check.expected_answer) if check else None
 
     def _name(self, concept):
         topic = self.curriculum.by_id.get(concept)

@@ -50,21 +50,33 @@ def workout(tmp_path):
         yield graph, curriculum, human, tutor, author
 
 
-def test_small_steps_then_missing_connection_then_teachback(workout):
-    graph, curriculum, human, tutor, author = workout
-    target, related = curriculum.ids["derivatives"], curriculum.ids["slope"]
-    human.add_concept(related, understanding=8, method="test")
+def test_small_steps_end_without_a_quick_check(workout):
+    _, curriculum, human, tutor, author = workout
+    target = curriculum.ids["derivatives"]
     s = Session(target=target)
     first = tutor._teach(s, human.human_id, target, [])
     assert s.question.kind == "prediction" and len(first.beats) == 2
+    assert first.beats[-1].say_text == s.question.prompt  # the question is the hand-off, said last
     assert len(author.practices[-1][3]) == 1
     remaining = len(s.remaining_beats)
     tutor.act(s, human.human_id, "continue")
     assert len(s.remaining_beats) == remaining
-    while s.question.kind == "prediction":
+    while s.question:
         tutor.act(s, human.human_id, "answer", "my reasoning")
-    assert s.question.kind == "check"
-    tutor.act(s, human.human_id, "answer", "yes")
+    # The last step asks nothing: predictions between steps only, and no mastery is claimed.
+    assert not s.remaining_beats and {kind for kind, *_ in author.practices} == {"prediction"}
+    assert target not in human.snapshot().nodes
+    tutor.act(s, human.human_id, "continue")
+    assert target in s.covered
+
+
+def test_missing_connection_synthesis_then_teachback(workout):
+    graph, curriculum, human, tutor, _ = workout
+    target, related = curriculum.ids["derivatives"], curriculum.ids["slope"]
+    human.add_concept(related, understanding=8, method="test")
+    human.add_concept(target, understanding=8, method="test")
+    s = Session(target=target, current=target)
+    tutor._consolidate(s, human.human_id, target, [])
     assert s.question.kind == "synthesis" and s.question.related == related
     assert not human.snapshot().edges
     tutor.act(s, human.human_id, "answer", "my reasoning")
@@ -91,7 +103,7 @@ def test_no_direct_connection_uses_teachback_and_grader_failure_does_not_score(w
     author.offline = True
     result = tutor.act(s, human.human_id, "answer", "a long answer")
     assert human.revision == before and s.question.kind == "teachback"
-    assert "couldn't evaluate" in result.beats[0].say_text
+    assert "couldn't check" in result.beats[0].say_text
     assert tutor.reviews.suggestions(human.human_id)["topics"][0]["reviews"] == 0
     author.offline, author.score = False, 3
     tutor.act(s, human.human_id, "answer", "a mistaken answer")
@@ -151,7 +163,7 @@ def test_authored_offline_lessons_also_pause_and_microchecks_do_not_claim_master
     assert tutor.reviews.suggestions(human.human_id)["practice_by_kind"]["prediction_choice"] == 1
     assert s.question is None and s.remaining_beats  # explicit self-explanation pause
     tutor.act(s, human.human_id, "continue")
-    assert s.question.kind == "check"
+    assert s.question is None and not s.remaining_beats  # no quick check after the last step
 
 
 def test_simultaneous_answers_cannot_grade_the_next_question_with_a_stale_epoch(workout):
@@ -273,3 +285,18 @@ def test_3d_surface_validation_and_degenerate_quadratics():
                                     diagram=diagram(dimensions=3, surfaces=[bad])))
     with pytest.raises(LessonError):
         complex_quadratic_lesson(0, 1, 1)
+
+
+def test_hints_point_back_to_the_step_then_move_on_without_scoring(workout):
+    from backend.app.conversation import Phrasing
+    _, curriculum, human, tutor, _ = workout
+    tutor.phrasing = Phrasing(variety=False, seed=0)
+    s = Session(target=curriculum.ids["derivatives"])
+    tutor._teach(s, human.human_id, s.target, [])
+    q, before = s.question, len(s.remaining_beats)
+    hinted = tutor.act(s, human.human_id, "hint")
+    assert s.question is q and [b.say_text for b in hinted.beats] == ["Here's a hint.", s.taught_beats[-1], q.prompt]
+    revealed = tutor.act(s, human.human_id, "hint")
+    # The expected answer is a rubric, so it is never read out: the next step shows the idea.
+    assert revealed.beats[0].say_text == "Let's see it in the next step." and len(s.remaining_beats) == before - 1
+    assert not human.snapshot().nodes and tutor.reviews.suggestions(human.human_id)["practice_attempts"] == 0

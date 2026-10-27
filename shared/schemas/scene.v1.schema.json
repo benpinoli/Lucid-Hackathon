@@ -392,6 +392,81 @@
       "title": "Label",
       "type": "object"
     },
+    "Model3D": {
+      "additionalProperties": false,
+      "description": "A catalog model, fitted so its largest side is `size` board units and centred at `position`.\n\nTransforms are expressions, so sliders and beat animations move the object itself.",
+      "properties": {
+        "primitive": {
+          "const": "model3d",
+          "default": "model3d",
+          "title": "Primitive",
+          "type": "string"
+        },
+        "model": {
+          "enum": [
+            "saturn_v",
+            "iss",
+            "hubble",
+            "lunar_module",
+            "mars_rover",
+            "space_shuttle",
+            "asteroid",
+            "cubesat",
+            "fox",
+            "milk_truck"
+          ],
+          "title": "Model",
+          "type": "string"
+        },
+        "position": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Position",
+          "type": "array"
+        },
+        "size": {
+          "default": "2",
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Size",
+          "type": "string"
+        },
+        "rotation": {
+          "items": {
+            "maxLength": 160,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Rotation",
+          "type": "array"
+        },
+        "clip": {
+          "anyOf": [
+            {
+              "maxLength": 40,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Clip"
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "title": "Model3D",
+      "type": "object"
+    },
     "Node": {
       "additionalProperties": false,
       "properties": {
@@ -410,6 +485,7 @@
               "expr_point": "#/$defs/ExprPoint",
               "expr_surface": "#/$defs/ExprSurface",
               "line_curve": "#/$defs/Curve",
+              "model3d": "#/$defs/Model3D",
               "slider": "#/$defs/Slider",
               "text_label": "#/$defs/Label",
               "vector_arrow": "#/$defs/Arrow"
@@ -446,6 +522,9 @@
             },
             {
               "$ref": "#/$defs/ExprSurface"
+            },
+            {
+              "$ref": "#/$defs/Model3D"
             }
           ],
           "title": "Content"

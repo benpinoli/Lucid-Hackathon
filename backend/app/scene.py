@@ -1,4 +1,4 @@
-"""Safe retained scene contract. No executable expressions or remote assets."""
+"""Safe retained scene contract. No executable expressions; 3D models only by vetted catalog id."""
 from __future__ import annotations
 
 from collections import OrderedDict
@@ -7,6 +7,7 @@ from typing import Annotated, Literal
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
 from .expressions import ExpressionError, parse as parse_expression
+from .models import CATALOG
 
 MAX_BYTES = 16_384
 MAX_OBJECTS = 30
@@ -27,6 +28,8 @@ def _expression(value: str) -> str:
 # Safe arithmetic only (see expressions.py); renderers evaluate it with slider parameters.
 Expr = Annotated[str, Field(min_length=1, max_length=160), AfterValidator(_expression)]
 ExprPoint2 = Annotated[list[Expr], Field(min_length=2, max_length=3)]
+ExprTriple = Annotated[list[Expr], Field(min_length=3, max_length=3)]
+ModelId = Literal[tuple(CATALOG)]
 
 
 class StrictModel(BaseModel):
@@ -126,6 +129,25 @@ class ExprPoint(StrictModel):
     text: Text | None = None
 
 
+class Model3D(StrictModel):
+    """A catalog model, fitted so its largest side is `size` board units and centred at `position`.
+
+    Transforms are expressions, so sliders and beat animations move the object itself.
+    """
+    primitive: Literal["model3d"] = "model3d"
+    model: ModelId
+    position: ExprTriple = Field(default_factory=lambda: ["0", "0", "0"])
+    size: Expr = "2"
+    rotation: ExprTriple = Field(default_factory=lambda: ["0", "0", "0"])  # Degrees about x, y, z.
+    clip: Annotated[str, Field(max_length=40)] | None = None
+
+    @model_validator(mode="after")
+    def known_clip(self):
+        if self.clip is not None and self.clip not in CATALOG[self.model].clips:
+            raise ValueError(f"Model {self.model} has no clip {self.clip!r}")
+        return self
+
+
 class Slider(StrictModel):
     primitive: Literal["slider"] = "slider"
     # Authored projection bindings, or a diagram parameter (single letter; e and t are reserved).
@@ -144,7 +166,7 @@ class Slider(StrictModel):
         return self
 
 
-Primitive = Annotated[Axes | Axes3D | Arrow | Curve | Label | Slider | ExprCurve | ExprArrow | ExprPoint | ExprSurface,
+Primitive = Annotated[Axes | Axes3D | Arrow | Curve | Label | Slider | ExprCurve | ExprArrow | ExprPoint | ExprSurface | Model3D,
                       Field(discriminator="primitive")]
 
 

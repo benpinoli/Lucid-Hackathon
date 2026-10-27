@@ -5,7 +5,8 @@ export default defineConfig({
   testDir: './tests/browser', timeout: 30000, workers: 1,
   use: { baseURL: 'http://localhost:5174', headless: true, viewport: { width: 1440, height: 1000 } },
   webServer: [
-    { command: `"${python}" tests/serve_backend.py`, url: 'http://127.0.0.1:8001/api/health', reuseExistingServer: false },
+    // Fixed phrasing (first variant) keeps spoken-text assertions deterministic.
+    { command: `"${python}" tests/serve_backend.py`, url: 'http://127.0.0.1:8001/api/health', reuseExistingServer: false, env: { LUCID_TUTOR_VARIETY: '0' } },
     { command: 'npm run dev -- --port 5174 --strictPort', url: 'http://localhost:5174', env: { LUCID_BACKEND_URL: 'http://127.0.0.1:8001' }, reuseExistingServer: false },
   ],
 });

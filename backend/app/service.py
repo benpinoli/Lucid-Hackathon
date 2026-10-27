@@ -87,7 +87,7 @@ class TutorService:
                 teaching.graph_context = self.path(user, sources, target)
         return self._commit(user, lesson, expected_epoch, teaching, started, planned)
 
-    def tutor_turn(self, user, lesson, action, text, expected_epoch):
+    def tutor_turn(self, user, lesson, action, text, expected_epoch, view=None):
         """One conversational step; the session lock serializes a lesson, never the whole service."""
         started = monotonic()
         if self.tutor is None:
@@ -98,13 +98,15 @@ class TutorService:
             session = self.sessions.setdefault(lesson, Session())
         with session.lock:
             with self.lock:
-                if self.owned(user, lesson).epoch != expected_epoch:
+                state = self.owned(user, lesson)
+                if state.epoch != expected_epoch:
                     raise Conflict("Stale turn epoch; request snapshot")
+                screen = list(state.nodes.values())  # Exactly what the learner's scene shows now.
             working = Session(**{f.name: deepcopy(getattr(session, f.name)) for f in fields(Session)
                                  if f.name not in ("lock", "validate_write")})
             working.lock = session.lock
             working.validate_write = lambda: self._validate_tutor_epoch(user, lesson, expected_epoch)
-            teaching = self.tutor.act(working, user, action, text)
+            teaching = self.tutor.act(working, user, action, text, view=view, screen=screen)
             planned = monotonic()
             with self.lock:
                 self.snapshots.clear()  # Graded answers may have changed personal scores.

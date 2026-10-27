@@ -459,7 +459,7 @@ def claude_client(*replies):
             stop = reply.pop("stop_reason", "end_turn")
             content = [] if stop == "refusal" else [{"type": "text", "text": json.dumps(reply)}]
         return httpx2.Response(200, json={
-            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5",
             "content": content, "stop_reason": stop, "stop_sequence": None,
             "usage": {"input_tokens": 1, "output_tokens": 1}})
 
@@ -484,7 +484,7 @@ def test_claude_planner_builds_verified_lesson_from_parameters():
     assert lesson.recipe_id == "dijkstra_v1" and lesson.planned_by == "claude"
     assert lesson.beats[-1].say_text == "T is settled at distance 3. Shortest path: S → X → T."
     request = seen[0]
-    assert request["model"] == "claude-opus-5-5" and request["fallbacks"] == "default"
+    assert request["model"] == "claude-sonnet-5-5" and request["fallbacks"] == "default"
     assert request["output_config"]["effort"] == "low"
     assert request["output_config"]["format"]["schema"]["properties"]["recipe"]["enum"] == [
         "vector_projection", "dijkstra", "mean_value", "complex_quadratic", "none"]
@@ -544,7 +544,7 @@ def test_planner_from_env(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     assert ClaudePlanner.from_env() is None
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
-    assert ClaudePlanner.from_env().model == "claude-opus-5-5"
+    assert ClaudePlanner.from_env().model == "claude-sonnet-5-5"
 
 
 # ---- learning goals -----------------------------------------------------------------------
@@ -737,6 +737,7 @@ def test_mastery_never_skips_prerequisites(goals, key):
 from backend.app.author import Check, ConceptLink, ConceptSpec, Written, grade_locally  # noqa: E402
 from backend.app.diagrams import (AUTHORED, DArrow, DCurve, DiagramError, DiagramLesson, DLabel,  # noqa: E402
                                   DSlider, compile_lesson, diagram, DBeat)
+from backend.app.conversation import Phrasing  # noqa: E402
 from backend.app.tutor import Session, Tutor  # noqa: E402
 
 
@@ -747,8 +748,9 @@ class FakeAuthor:
     def __init__(self, prerequisite=None):
         self.prerequisite, self.calls = prerequisite, []
 
-    def explain(self, concept, description, context, request=None):
+    def explain(self, concept, description, context, request=None, screen=None, memory=None):
         self.calls.append(("explain", concept, request))
+        self.screen, self.memory = screen, memory
         plan = compile_lesson(AUTHORED["functions"], recipe_id="generated_v1", generated=True)
         return Written(plan, Check(question=f"Say yes about {concept}", expected_answer="yes"),
                        self.prerequisite if request else None)
@@ -773,7 +775,7 @@ def tutor_env(goals):
     human = graph.create_human()
 
     def make(author=None):
-        tutor = Tutor(graph, goals_, plan, author, active_learning=False)
+        tutor = Tutor(graph, goals_, plan, author, active_learning=False, phrasing=Phrasing(variety=False, seed=0))
         session = Session()
         return tutor, session, lambda action, text="": tutor.act(session, human.human_id, action, text)
     return graph, curriculum, human, make
@@ -793,40 +795,51 @@ def test_tutor_runs_the_whole_loop_without_a_provider(tutor_env):
     tutor, session, act = make()
     first = act("goal", "I want to learn the mean value theorem")
     assert first.tutor == {"mode": "diagnosing", "awaiting_answer": True, "goal": "Mean value theorem"}
-    assert "Is it parallel to the secant" in first.beats[-1].say_text
+    # The check opens as a conversation, then asks open questions: no options read out.
+    assert [b.say_text for b in first.beats] == ["Mean value theorem, good pick.",
+                                                 "Have you worked with Mean value theorem before?"]
+    probe = act("answer", "yes, a little")
+    assert probe.beats[0].say_text == "Then let's check one thing."
+    assert probe.beats[-1].say_text == "The mean value theorem guarantees a point where the tangent is…"
     plans = run_check(act, session, ["2x + 1"])
     lesson = plans[-1]
     # Taught silently along the cheapest route: no route, cost or map in what the learner hears.
     spoken = " ".join(b.say_text for b in lesson.beats)
-    assert "Next, let's look at Slope and secant lines" in spoken and "route" not in spoken.lower()
-    assert lesson.tutor["mode"] == "checking" and lesson.beats[-1].say_text.startswith("Quick check:")
+    assert lesson.concept_id == curriculum.ids["slope"] and "route" not in spoken.lower()
+    assert "You know Functions, so let's start there." in spoken  # bridged from what they know
+    assert lesson.beats[-1].say_text == "Ready for the next piece?"  # the learner sets the pace
+    # Lessons end without a quick check: Continue moves along the route.
+    assert lesson.tutor["mode"] == "checking" and not lesson.tutor["awaiting_answer"]
+    assert not any("check" in b.say_text.casefold() for b in lesson.beats)
     assert any(n.content.primitive == "slider" for n in lesson.nodes)  # every explanation has a diagram
     while session.mode == "checking":
-        act("answer", session.question.expected)
+        assert session.question is None
+        act("continue")
     assert session.mode == "done"
     members = graph.human(human.human_id).snapshot().nodes
     target = curriculum.ids["mean_value_theorem"]
-    assert members[target].understanding == 8.0
+    # Only graded answers change scores, and lessons no longer ask one: the starting check stands.
+    assert members[target].understanding == 1.0
     methods = {h["method"] for h in graph.history(kind="understanding", human_id=human.human_id, concept=target)}
-    assert methods == {"voice_diagnostic", "voice_check"}
+    assert methods == {"voice_diagnostic"}
 
 
 def test_correct_goal_answer_skips_teaching_and_confusion_is_free(tutor_env):
     graph, curriculum, human, make = tutor_env
     tutor, session, act = make()
     act("goal", "derivatives")
+    act("answer", "yes")
     done = act("answer", "2x")
-    assert done.tutor["mode"] == "done" and "You've got Derivatives" in " ".join(b.say_text for b in done.beats)
+    assert done.tutor["mode"] == "done" and [b.say_text for b in done.beats][:2] == ["Yes, 2x.", "You've got Derivatives."]
     tutor, session, act = make()
     act("goal", "mean value theorem")
     run_check(act, session, ["derivative of x²"])  # knows derivatives: go straight to the theorem
     assert session.current == curriculum.ids["mean_value_theorem"]
     for _ in range(5):
-        assert act("confused", "why is it parallel?").tutor["awaiting_answer"]
+        assert not act("confused", "why is it parallel?").tutor["awaiting_answer"]
     assert session.attempts == {} and session.mode == "checking"
-    for _ in range(3):
-        act("answer", "vertical")
-    assert session.mode == "done"  # three wrong answers: covered, move on, never loop forever
+    act("continue")
+    assert session.mode == "done"  # no check to pass: Continue moves on
 
 
 def test_tutor_detours_to_a_prerequisite_and_creates_missing_concepts(tutor_env):
@@ -836,25 +849,28 @@ def test_tutor_detours_to_a_prerequisite_and_creates_missing_concepts(tutor_env)
     act("goal", "derivatives")
     run_check(act, session, [])
     while session.current != curriculum.ids["derivatives"]:
-        act("answer", "yes")
+        act("continue")
     clarified = act("confused", "I don't get how to differentiate nested functions")
-    assert "the missing piece is Chain rule" in " ".join(b.say_text for b in clarified.beats)
+    assert "We need Chain rule first." in " ".join(b.say_text for b in clarified.beats)
     chain = graph.god.get_concept("Chain rule")
     assert curriculum.ids["derivatives"] in graph.god.neighbors(chain.id)  # in the shared graph
     assert session.current == chain.id and session.detours == [curriculum.ids["derivatives"]]
     assert clarified.generated and clarified.planned_by == "claude"
-    resumed = act("answer", "yes")
-    assert "Now, back to Derivatives" in " ".join(b.say_text for b in resumed.beats)
-    assert session.current == curriculum.ids["derivatives"]
+    while session.remaining_beats:
+        act("continue")
+    resumed = act("continue")
+    assert "Back to Derivatives." in " ".join(b.say_text for b in resumed.beats)
+    assert session.current == curriculum.ids["derivatives"] and not session.detours
     proposals = graph.history(kind="similarity", concept=chain.id)
-    assert proposals and graph.human(human.human_id).snapshot().nodes[chain.id].understanding == 8.0
+    assert proposals and chain.id not in graph.human(human.human_id).snapshot().nodes  # no check, no score
 
 
 def test_tutor_can_build_a_new_goal_concept(tutor_env):
     graph, curriculum, human, make = tutor_env
     tutor, session, act = make(FakeAuthor())
     first = act("goal", "teach me the chain rule")
-    assert first.tutor["goal"] == "Chain rule" and "Say yes about Chain rule" in first.beats[-1].say_text
+    assert first.tutor["goal"] == "Chain rule"
+    assert act("answer", "yes").beats[-1].say_text == "Say yes about Chain rule"
     tutor, session, act = make()
     with pytest.raises(GoalError):
         act("goal", "quantum tunnelling")  # without an author nothing new can be built
@@ -864,10 +880,11 @@ def test_free_questions_keep_the_pending_check(tutor_env):
     graph, curriculum, human, make = tutor_env
     tutor, session, act = make()
     act("goal", "vector projection")
-    run_check(act, session, ["(1, 2) + (3, 4)"])
+    act("answer", "I've seen it")
     pending = session.question
+    assert pending.kind == "diagnostic"
     answer = act("question", "what is a dot product?")
-    assert session.question is pending and answer.beats[-1].say_text.startswith("Whenever you're ready")
+    assert session.question is pending and answer.beats[-1].say_text == f"Here it is again. {pending.spoken}"
     assert act("continue").beats[-1].say_text == pending.spoken
 
 
@@ -881,15 +898,70 @@ def test_known_goal_and_requests_for_more_keep_teaching_without_regrading(tutor_
     assert first.tutor["mode"] == "checking" and first.concept_id == target
     for action, text in [("answer", "I want to learn more"), ("review", ""), ("deeper", "")]:
         result = act(action, text)
-        assert result.tutor["awaiting_answer"] and result.concept_id == target
+        assert not result.tutor["awaiting_answer"] and result.concept_id == target
         assert human.revision == before
     assert human.snapshot().nodes[target].understanding == 9
+
+
+def test_questions_are_open_first_with_options_only_as_a_hint(tutor_env):
+    _, curriculum, _, make = tutor_env
+    tutor, session, act = make()
+    act("goal", "vector projection")
+    act("answer", "yes")
+    q = session.question
+    assert q.kind == "diagnostic" and q.offered is None and q.spoken == q.prompt
+    # An answer that matches no choice isn't graded: the options are offered instead.
+    offered = act("answer", "something about light")
+    assert session.question is q and q.offered == q.choices
+    assert offered.beats[0].say_text == "Here are some options." and offered.beats[-1].say_text.endswith("?")
+    assert sum(n.content.text[:3] in ("A. ", "B. ", "C. ", "D. ") for n in offered.nodes if n.id.startswith("q")) == 4
+    # Shuffled when asked: the answer isn't always listed first.
+    assert len({tutor._question(c, "check").correct for c in curriculum.ids.values()}) > 1
+
+
+def test_hint_ladder_narrows_before_revealing_and_never_retries_after_a_reveal(tutor_env):
+    _, curriculum, _, make = tutor_env
+    tutor, session, act = make()
+    dot = curriculum.ids["dot_product"]
+    session.target = session.current = dot
+    session.mode = "checking"
+    session.question = q = tutor._question(dot, "check")
+    wrong = next(c for c in q.choices if c != q.answer)
+    retry = act("answer", wrong)  # First miss: two options, and the answer isn't given away.
+    assert session.question is q and len(q.offered) == 2 and wrong not in q.offered and q.answer in q.offered
+    assert [b.say_text for b in retry.beats[:-1]] == ["Not quite.", "It's one of these two."]
+    other = next(c for c in q.offered if c != q.answer)
+    missed = act("answer", other)  # Second miss: the answer, then moving on (no "try again").
+    assert missed.beats[0].say_text == f"Not quite. It's {q.answer}." and session.question is None
+    assert not any("try" in b.say_text.casefold() for b in missed.beats[:2])
+    session.question = q = tutor._question(dot, "check")
+    act("hint")
+    assert q.offered == q.choices and session.question is q
+    act("hint")
+    assert len(q.offered) == 2 and q.answer in q.offered
+
+
+def test_new_learners_skip_the_goal_question_and_yes_moves_on(tutor_env):
+    graph, curriculum, human, make = tutor_env
+    tutor, session, act = make()
+    target = curriculum.ids["mean_value_theorem"]
+    act("goal", "mean value theorem")
+    probe = act("answer", "no, never")
+    assert probe.beats[0].say_text == "No problem, we'll start simple."
+    assert session.question.concept != target  # no point quizzing them on the goal itself
+    assert graph.human(human.human_id).snapshot().nodes[target].understanding == 1.0
+    run_check(act, session, [])
+    current = session.current
+    assert session.question is None and act("hint").beats[0].say_text == "There's no question waiting right now."
+    act("answer", "yes, ready")  # "Ready for the next piece?" "Yes."
+    assert session.current != current and session.question is None
 
 
 def test_continue_after_completion_reopens_teaching(tutor_env):
     _, curriculum, _, make = tutor_env
     _, session, act = make()
     act("goal", "derivatives")
+    act("answer", "yes")
     act("answer", "2x")
     assert session.mode == "done"
     result = act("continue")
@@ -908,11 +980,12 @@ def test_new_generated_goal_can_be_assessed_and_routed(tutor_env):
     for _ in range(16):
         if session.current == chain:
             break
-        taught = act("answer", session.question.expected)
+        taught = act("continue")
     assert taught.concept_id == chain and taught.generated
-    finished = act("answer", "yes")
+    finished = act("continue")
     assert finished.tutor["mode"] == "done"
-    assert human.snapshot().nodes[chain].understanding == 8
+    methods = {h["method"] for h in graph.history(kind="understanding", human_id=human.human_id, concept=chain)}
+    assert methods == {"voice_diagnostic"}  # the lesson itself awards no mastery
 
 
 class FactAuthor(FakeAuthor):
@@ -920,9 +993,9 @@ class FactAuthor(FakeAuthor):
         return ConceptSpec(name="Even functions", description="On a symmetric domain, f(-x) = f(x).",
                            links=[ConceptLink(concept="Functions", similarity=8)])
 
-    def explain(self, concept, description, context, request=None):
+    def explain(self, concept, description, context, request=None, screen=None, memory=None):
         self.context = context
-        written = super().explain(concept, description, context, request)
+        written = super().explain(concept, description, context, request, screen=screen, memory=memory)
         written.facts = [
             ConceptSpec(name="Symmetry", description="A transformation preserves a figure or function.", links=[]),
             ConceptSpec(name="Even functions", description="On a symmetric domain, f(-x) = f(x).",
@@ -978,7 +1051,7 @@ def test_exploration_can_go_deeper_and_review_with_provider_unavailable(tutor_en
     explored = act("explore", "even functions")
     assert session.current is None and session.viewed == explored.concept_id
     deeper = act("deeper")
-    assert deeper.concept_id == explored.concept_id and deeper.tutor["awaiting_answer"]
+    assert deeper.concept_id == explored.concept_id and not deeper.tutor["awaiting_answer"]
     tutor.author = None
     reviewed = act("review")
     assert reviewed.generated and reviewed.nodes == explored.nodes
@@ -1079,11 +1152,195 @@ def test_tutor_over_websocket_and_http(tmp_path):
             assert asked["plan"]["tutor"]["awaiting_answer"] and asked["plan"]["recipe_id"] == "tutor_card_v1"
             ws.send_json({"type": "tutor", "action": "dance", "text": "", "expected_epoch": 1})
             assert ws.receive_json()["type"] == "error"
+        probe = client.post(f"/api/lessons/{lesson}/tutor", headers=headers(),
+                            json={"action": "answer", "text": "yes", "expected_epoch": 1}).json()
+        assert probe["plan"]["tutor"]["awaiting_answer"]
         done = client.post(f"/api/lessons/{lesson}/tutor", headers=headers(),
-                           json={"action": "answer", "text": "2x", "expected_epoch": 1}).json()
+                           json={"action": "answer", "text": "2x", "expected_epoch": 2}).json()
         assert done["plan"]["tutor"]["mode"] == "done"
         missing = client.post(f"/api/lessons/{lesson}/tutor", headers=headers(),
-                              json={"action": "goal", "text": "quantum tunnelling", "expected_epoch": 2})
+                              json={"action": "goal", "text": "quantum tunnelling", "expected_epoch": 3})
         assert missing.status_code == 404 and "ANTHROPIC_API_KEY" in missing.json()["detail"]
         assert client.delete(f"/api/lessons/{lesson}", headers=headers()).status_code == 204
         assert lesson not in app.state.service.sessions
+
+
+def test_claude_timeouts_fit_measured_latency():
+    """Explanations take 8-12 s live; they must not share the quick calls' fail-fast timeout."""
+    import anthropic
+    import httpx2
+    from backend.app.author import ClaudeAuthor
+    from backend.app.planner import EXPLAIN_TIMEOUT, QUICK_TIMEOUT
+    timeouts = {}
+
+    def handler(request):
+        body = json.loads(request.content)
+        kind = "explain" if body.get("tools") else "quick"
+        timeouts[kind] = request.extensions["timeout"]["read"]
+        content = ([{"type": "tool_use", "id": "t", "name": "submit_explanation", "input": {}}] if kind == "explain"
+                   else [{"type": "text", "text": json.dumps({"verdict": "correct", "feedback": "Yes."})}])
+        return httpx2.Response(200, json={"id": "m", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5",
+                                          "content": content, "stop_reason": "end_turn", "stop_sequence": None,
+                                          "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+    client = anthropic.Anthropic(api_key="sk-test", timeout=QUICK_TIMEOUT, max_retries=0,
+                                 http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)))
+    author = ClaudeAuthor(client)
+    author.grade("Q?", "A", "A")
+    author.explain("Slope", "", {})  # invalid input: validated and rejected, but the timeout is what we check
+    assert timeouts == {"quick": QUICK_TIMEOUT, "explain": EXPLAIN_TIMEOUT}
+    assert EXPLAIN_TIMEOUT >= 3 * 12 and QUICK_TIMEOUT >= 3 * 6  # three times the slowest measured call
+
+
+# ---- what the learner sees, and the learner's notes ---------------------------------------------
+from backend.app.memory import LearnerMemory, MemoryError as NotesError  # noqa: E402
+from backend.app.screen import describe_screen  # noqa: E402
+
+
+def test_learner_notes_store_is_scoped_bounded_and_complete(tmp_path):
+    graph = MemoryGraph.open(f"sqlite:///{tmp_path / 'notes.db'}")
+    store = LearnerMemory(graph)
+    a, b = graph.create_human().human_id, graph.create_human().human_id
+    tool = store.for_learner(a)
+    assert tool.to_dict() == {"type": "memory_20250818", "name": "memory"}
+    tool.call({"command": "create", "path": "/memories/learner.md", "file_text": "- confuses secant and tangent"})
+    tool.call({"command": "str_replace", "path": "/memories/learner.md", "old_str": "secant", "new_str": "secant line"})
+    tool.call({"command": "insert", "path": "/memories/learner.md", "insert_line": 1, "insert_text": "- truck example worked"})
+    assert "1\t- confuses secant line and tangent" in tool.call({"command": "view", "path": "/memories/learner.md"})
+    tool.call({"command": "rename", "old_path": "/memories/learner.md", "new_path": "/memories/notes.md"})
+    assert store.files(a) == {"/memories/notes.md": "- confuses secant line and tangent\n- truck example worked"}
+    assert store.render(b).startswith("(no notes yet")  # another learner never sees them
+    for bad in [{"command": "create", "path": "/etc/passwd", "file_text": "x"},
+                {"command": "view", "path": "/memories/../secrets"},
+                {"command": "create", "path": "/memories/big.md", "file_text": "x" * 4001},
+                {"command": "str_replace", "path": "/memories/notes.md", "old_str": "missing", "new_str": "y"},
+                {"command": "delete", "path": "/memories/none.md"}]:
+        with pytest.raises(NotesError):
+            tool.call(bad)
+    for i in range(7):
+        tool.call({"command": "create", "path": f"/memories/f{i}.md", "file_text": "x"})
+    with pytest.raises(NotesError, match="At most"):
+        tool.call({"command": "create", "path": "/memories/ninth.md", "file_text": "x"})
+    tool.call({"command": "delete", "path": "/memories/f0.md"})
+    assert len(store.files(a)) == 7
+    graph.close()
+
+
+def test_screen_description_uses_the_learners_slider_values():
+    plan = compile_lesson(AUTHORED["derivatives"])
+    screen = describe_screen(plan.nodes, [b.say_text for b in plan.beats],
+                             {"active_beat": 1, "sliders": {"param.p": 2.0}, "animating": None, "in_vr": True},
+                             question="Quick check?", exchanges=[{"learner": "why?", "action": "confused"}])
+    diagram = "\n".join(screen["diagram"])
+    assert "now at (2, 0)" in diagram  # 0.25*2^3 - 2 evaluated at the learner's p, not the default
+    assert "learner moved it to 2" in diagram
+    assert screen["spoken_steps"][1]["active"] and screen["learner_view"]["active_step"] == 2
+    assert screen["learner_view"] == {"active_step": 2, "sliders_moved_by_learner": {"param.p": 2.0},
+                                      "current_parameter_values": {"p": 2.0}, "animating": None, "in_vr": True}
+    assert screen["pending_question"] == "Quick check?" and screen["recent_exchanges"][0]["learner"] == "why?"
+    untouched = describe_screen(plan.nodes, [], {})
+    assert "at its default 1" in "\n".join(untouched["diagram"])
+
+
+def tool_reply(*blocks, stop="tool_use"):
+    return {"id": "m", "type": "message", "role": "assistant", "model": "claude-opus-5-5", "content": list(blocks),
+            "stop_reason": stop, "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+
+def test_explanation_request_carries_screen_and_notes_and_applies_memory_edits(tmp_path):
+    import anthropic
+    import httpx2
+    from backend.app.author import ClaudeAuthor
+    graph = MemoryGraph.open(f"sqlite:///{tmp_path / 'explain.db'}")
+    human = graph.create_human().human_id
+    store = LearnerMemory(graph)
+    store.write(human, "/memories/learner.md", "- prefers real objects")
+    lesson = {"lesson": AUTHORED["slope"].model_dump(), "check": None, "prerequisite": None}
+    replies, seen = [
+        # Round 1: only a memory edit (allowed), which must be applied and answered.
+        tool_reply({"type": "tool_use", "id": "m1", "name": "memory", "input": {
+            "command": "str_replace", "path": "/memories/learner.md", "old_str": "- prefers real objects",
+            "new_str": "- prefers real objects\n- secant/tangent confusion resolved by sliding p"}}),
+        # Round 2: a bad memory command next to the lesson; the lesson still lands.
+        tool_reply({"type": "tool_use", "id": "m2", "name": "memory", "input": {"command": "create", "path": "/tmp/x", "file_text": "x"}},
+                   {"type": "tool_use", "id": "s1", "name": "submit_explanation", "input": lesson}),
+    ], []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, json=replies.pop(0))
+
+    author = ClaudeAuthor(anthropic.Anthropic(api_key="sk-test", max_retries=0, http_client=anthropic.DefaultHttpxClient(
+        transport=httpx2.MockTransport(handler))))
+    screen = describe_screen(compile_lesson(AUTHORED["slope"]).nodes, ["The slope is rise over run."],
+                             {"active_beat": 0, "sliders": {"param.p": -2.5}})
+    written = author.explain("Slope", "rise over run", {"goal": "Derivatives"}, request="why rise over run?",
+                             screen=screen, memory=store.for_learner(human))
+    assert written and written.plan.generated
+    first = seen[0]
+    user_text = first["messages"][0]["content"]
+    assert "## What the learner is looking at right now" in user_text and "learner moved it to -2.5" in user_text
+    assert "## Your notes on this learner (/memories)" in user_text and "prefers real objects" in user_text
+    assert [t.get("type", t.get("name")) for t in first["tools"]] == ["submit_explanation", "memory_20250818"]
+    assert first["system"][0]["cache_control"] == {"type": "ephemeral"} and "LEARNER NOTES" in first["system"][0]["text"]
+    answered = seen[1]["messages"][2]["content"]
+    assert answered == [{"type": "tool_result", "tool_use_id": "m1", "content": "Edited /memories/learner.md"}]
+    assert "resolved by sliding p" in store.files(human)["/memories/learner.md"]
+    assert "/tmp/x" not in str(store.files(human))  # the bad command was refused, not applied
+    graph.close()
+
+
+def test_learner_view_reaches_the_author_and_is_validated(tmp_path):
+    graph = MemoryGraph.open(f"sqlite:///{tmp_path / 'view.db'}")
+    human = graph.create_human()
+    app = create_app(graph, {TOKEN: human.human_id}, voice=None, planner=None, author=FakeAuthor())
+    with graph, TestClient(app) as client:
+        author = app.state.author
+        lesson = client.post("/api/lessons", headers=headers()).json()["lesson_id"]
+        url = f"/api/lessons/{lesson}/tutor"
+        client.post(url, headers=headers(), json={"action": "goal", "text": "derivatives", "expected_epoch": 0})
+        epoch = 1
+        while app.state.service.sessions[lesson].mode == "diagnosing":
+            epoch = client.post(url, headers=headers(), json={"action": "answer", "text": "not sure",
+                                                              "expected_epoch": epoch}).json()["turn_epoch"]
+        # The learner is on the Functions lesson (sliders m and c) and dragged the slope.
+        view = {"active_beat": 1, "sliders": {"param.m": -1.5, "param.q": 3.0}, "animating": None, "in_vr": False}
+        bad = client.post(url, headers=headers(), json={"action": "confused", "text": "?", "expected_epoch": epoch,
+                                                        "view": {"sliders": {"__proto__": 1}}})
+        assert bad.status_code == 422
+        reply = client.post(url, headers=headers(), json={"action": "confused", "text": "why does the line touch?",
+                                                          "expected_epoch": epoch, "view": view})
+        assert reply.status_code == 200, reply.text
+        screen = author.screen
+        # Only sliders really on screen count; q is not one of them.
+        assert screen["learner_view"]["sliders_moved_by_learner"] == {"param.m": -1.5}
+        assert screen["learner_view"]["active_step"] == 2
+        assert "slider 'slope m' (param.m) range [-2, 2], learner moved it to -1.5" in screen["diagram"]
+        assert screen["recent_exchanges"] and screen["recent_exchanges"][-1]["action"] == "answer"
+        assert author.memory is not None and author.memory.user == human.human_id
+
+
+def test_every_tool_call_in_an_explanation_reply_is_answered():
+    """The API rejects a follow-up that leaves any tool_use without a tool_result (seen live)."""
+    import anthropic
+    import httpx2
+    from backend.app.author import ClaudeAuthor
+    bad = AUTHORED["slope"].model_dump()
+    bad["diagram"]["curves"][0]["y"] = "w*t"
+    good = {"lesson": AUTHORED["slope"].model_dump(), "check": None, "prerequisite": None}
+    replies, seen = [
+        tool_reply({"type": "tool_use", "id": "s1", "name": "submit_explanation", "input": {"lesson": bad, "check": None, "prerequisite": None}},
+                   {"type": "tool_use", "id": "s2", "name": "submit_explanation", "input": good},
+                   {"type": "tool_use", "id": "x1", "name": "draw", "input": {}}),
+        tool_reply({"type": "tool_use", "id": "s3", "name": "submit_explanation", "input": good}),
+    ], []
+
+    def handler(request):
+        seen.append(json.loads(request.content))
+        return httpx2.Response(200, json=replies.pop(0))
+
+    author = ClaudeAuthor(anthropic.Anthropic(api_key="sk-test", max_retries=0, http_client=anthropic.DefaultHttpxClient(
+        transport=httpx2.MockTransport(handler))))
+    assert author.explain("Slope", "", {}) is not None
+    answered = {block["tool_use_id"] for block in seen[1]["messages"][2]["content"]}
+    assert answered == {"s1", "s2", "x1"}

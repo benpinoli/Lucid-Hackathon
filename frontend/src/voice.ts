@@ -15,8 +15,14 @@ type Hooks = {
 type Response = { id?: string; status?: string; metadata?: Record<string, string> | null; output?: { type?: string; name?: string; call_id?: string; arguments?: string }[] };
 type Script = { tag: string; beats: string[]; first: number; awaiting: boolean; id?: string; startedAt?: number };
 
-const SCRIPT_PROMPT = 'Read the following script aloud exactly as written, word for word, at a calm teaching pace, '
-  + 'with a short natural pause between paragraphs. Do not add, skip or change anything, and say nothing after it.\n\n';
+const SCRIPT_PROMPT = 'Speak the following script at a calm teaching pace, with a short natural pause between paragraphs. '
+  + 'Paragraphs starting with "~" are conversational cues: say each in your own words, keeping its meaning and roughly its '
+  + 'length, warm and natural for how the learner sounded, and never say the "~". Read every other paragraph exactly as '
+  + 'written, word for word. Do not add or skip anything, and say nothing after the last paragraph.\n\n';
+/** Conversational glue (reactions, transitions) may be phrased freely; lesson content and questions may not. */
+const cue = (beat: { beat_id: string; say_text: string }) => (/^i\d/.test(beat.beat_id) ? `~ ${beat.say_text}` : beat.say_text);
+const NUDGE_MS = 20000; // one gentle offer after this much silence on a pending question
+const NUDGES = ['Take your time. Want a hint?', 'No rush. Would a hint help?', 'Still thinking? I can give you a hint.'];
 const PARAGRAPH_PAUSE = 0.35; // seconds of pause assumed between beats
 const TAIL_MS = 350; // keep the mic closed briefly after playback so trailing echo is not heard
 const SLACK_MS = 4000; // if the drain event never arrives, reopen this long after the estimate
@@ -39,12 +45,14 @@ export class VoiceNarrator {
   private fallback?: ReturnType<typeof setTimeout>;
   private reopen?: ReturnType<typeof setTimeout>;
   private micOpen = true;
+  private nudgeTimer?: ReturnType<typeof setTimeout>;
+  private nudged = false;
   constructor(private hooks: Hooks) {}
 
   /** Speak a whole reply: explanation and any question, without gaps. */
-  narrate(plan: Plan) { this.speak(plan.beats.map(beat => beat.say_text), 0, !!plan.tutor?.awaiting_answer); }
+  narrate(plan: Plan) { this.nudged = false; this.speak(plan.beats.map(cue), 0, !!plan.tutor?.awaiting_answer); }
   /** Speak one beat only, e.g. when the learner selects it. */
-  speakBeat(plan: Plan, index: number) { this.speak([plan.beats[index].say_text], index, false); }
+  speakBeat(plan: Plan, index: number) { this.speak([cue(plan.beats[index])], index, false); }
   /** Tell the model about a lesson it did not request, so follow-up questions have context. */
   introduce(plan: Plan) {
     const steps = plan.beats.map((beat, i) => `${i + 1}. ${beat.say_text}`).join(' ');
@@ -55,6 +63,7 @@ export class VoiceNarrator {
   }
   /** Abandon the current script and cut any audio still playing. */
   stop() {
+    clearTimeout(this.nudgeTimer);
     this.drop();
     if (this.responseActive) this.hooks.send({ type: 'response.cancel' });
     if (this.playing.size) this.hooks.send({ type: 'output_audio_buffer.clear' });
@@ -68,6 +77,7 @@ export class VoiceNarrator {
       case 'input_audio_buffer.speech_started':
         // With the mic closed this can only be echo of the tutor's own voice: ignore it.
         if (this.script && !this.bargeIn) break;
+        clearTimeout(this.nudgeTimer); // The learner is answering.
         if (this.script) this.drop(); // Barge-in: the provider truncates its own audio.
         this.hooks.status('Listening…');
         break;
@@ -137,7 +147,7 @@ export class VoiceNarrator {
     this.hooks.status('Speaking…');
     let offset = 0;
     script.beats.forEach((text, i) => {
-      const focus = () => { if (this.script === script) this.hooks.focusBeat(script.first + i); };
+      const focus = () => { if (this.script === script && script.first >= 0) this.hooks.focusBeat(script.first + i); };
       if (i === 0) focus(); // with the first audio, not a tick later
       else this.timers.push(setTimeout(focus, offset * 1000));
       offset += text.length / this.charsPerSecond + PARAGRAPH_PAUSE;
@@ -156,6 +166,13 @@ export class VoiceNarrator {
     const awaiting = !!script?.awaiting;
     this.drop();
     this.hooks.status(awaiting ? 'Your turn. Take your time.' : 'Listening…');
+    // Silence is thinking time: never move on, but offer a hint once if it runs long.
+    if (awaiting && !this.nudged) this.nudgeTimer = setTimeout(() => this.nudge(), NUDGE_MS);
+  }
+  private nudge() {
+    if (this.script || this.requested || this.responseActive || this.playing.size) return;
+    this.nudged = true;
+    this.speak([`~ ${NUDGES[Math.floor(Math.random() * NUDGES.length)]}`], -1, true);
   }
   private drop() {
     this.generation++; this.script = undefined; this.requested = false;
@@ -180,11 +197,12 @@ export class VoiceNarrator {
         learning_context: plan.graph_context, goal: plan.tutor?.goal,
         note: 'The app now reads these steps aloud. Do not repeat them.' + (plan.tutor?.awaiting_answer
           ? ' A question is pending: when the learner replies, call tutor with action answer and their words.' : '') };
-    } catch (error) { output = { error: error instanceof Error ? error.message : 'Lesson failed' }; }
+    } catch { output = { error: 'That request did not go through.' }; }
     this.hooks.send({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: JSON.stringify(output) } });
     if (plan) this.narrate(plan);
     // Let the model briefly explain a failure instead of going silent.
-    else this.hooks.send({ type: 'response.create' });
+    else this.hooks.send({ type: 'response.create', response: { instructions: 'In one short, friendly sentence, tell the learner '
+      + 'that did not work and ask them to try again. Never mention technical details.' } });
   }
 }
 

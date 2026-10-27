@@ -94,12 +94,21 @@ def mean_value_points(coefficients, a, b):
     return points, slope
 
 
+class BeatAnimation(StrictModel):
+    """Move one slider from `start` to `end` while its beat is spoken (equal values hold it there)."""
+    binding: str
+    start: float
+    end: float
+    seconds: float = Field(default=3.0, ge=0.5, le=12)
+
+
 class TeachingBeat(StrictModel):
     beat_id: str
     say_text: str
     focus_ids: list[str]
     cue: str = "immediate"
     allow_interrupt: bool = True
+    animations: list[BeatAnimation] = Field(default_factory=list, max_length=3)
 
 
 class LessonPlan(StrictModel):
@@ -153,6 +162,10 @@ def vector_projection(u=(3.0, 0.0), v=(2.0, 3.0)) -> LessonPlan:
     _check(hypot(*u) >= 0.5 and hypot(*v) >= 0.5, "u and v must each have length at least 0.5")
     shadow = projection(v, u)
     dot, uu = fsum(a * b for a, b in zip(u, v)), fsum(a * a for a in u)
+    # Rotate v until it is perpendicular to u (no shadow), then back to the example the beats describe.
+    v_angle = round(degrees(atan2(v[1], v[0])), 6)
+    perpendicular = [(degrees(atan2(u[1], u[0])) + turn + 180) % 360 - 180 for turn in (90, -90)]
+    flat = round(min(perpendicular, key=lambda angle: abs(angle - v_angle)), 6)
     return LessonPlan(recipe_id="vector_projection_v1", nodes=[
         Node(id="axes", content=Axes()),
         Node(id="u", content=Arrow(end=u)),
@@ -160,13 +173,15 @@ def vector_projection(u=(3.0, 0.0), v=(2.0, 3.0)) -> LessonPlan:
         Node(id="projection", content=Arrow(end=shadow)),
         Node(id="formula", content=Label(text=r"$\operatorname{proj}_{\mathbf u}\mathbf v = \frac{\mathbf u\cdot\mathbf v}{\mathbf u\cdot\mathbf u}\mathbf u$")),
         Node(id="angle", content=Slider(binding="projection.angle", minimum=-180.0,
-                                        maximum=180.0, value=round(degrees(atan2(v[1], v[0])), 6))),
+                                        maximum=180.0, value=v_angle)),
     ], beats=[
         TeachingBeat(beat_id="vectors", say_text="Imagine shining parallel light toward a wall. "
                      "How long will an arrow's shadow be as you rotate it? "
-                     f"The two arrows represent u = {_vec(u)} and v = {_vec(v)}.", focus_ids=["u", "v"]),
+                     f"The two arrows represent u = {_vec(u)} and v = {_vec(v)}.", focus_ids=["u", "v"],
+                     animations=[BeatAnimation(binding="projection.angle", start=v_angle, end=flat, seconds=4)]),
         TeachingBeat(beat_id="projection", say_text=f"Project v onto u: its shadow is {_vec(shadow)}.",
-                     focus_ids=["projection"]),
+                     focus_ids=["projection"],
+                     animations=[BeatAnimation(binding="projection.angle", start=flat, end=v_angle, seconds=3)]),
         TeachingBeat(beat_id="dot", say_text=f"Here u dot v is {_num(dot)}, and u dot u is {_num(uu)}.",
                      focus_ids=["formula"]),
     ])
@@ -395,8 +410,8 @@ def mean_value_lesson(coefficients=(0.0, 0.0, 0.0, 0.125), a=0.0, b=3.0) -> Less
 def whiteboard() -> LessonPlan:
     return LessonPlan(recipe_id="whiteboard_v1", nodes=[
         Node(id="notice", content=Label(text="No verified animation for this topic yet."))
-    ], beats=[TeachingBeat(beat_id="fallback", say_text="Try asking about dot product, "
-                           "Dijkstra's algorithm, or the mean value theorem.",
+    ], beats=[TeachingBeat(beat_id="fallback", say_text="Try asking about derivatives, vectors or shortest paths, "
+                           "or name any topic you want to learn.",
                            focus_ids=["notice"])])
 
 

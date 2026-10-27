@@ -9,8 +9,9 @@ from time import monotonic
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
+import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field, ValidationError as SchemaError
 
 from memory_graph import Conflict, GraphError, MemoryGraph, NotFound, ResourceLimit
@@ -20,6 +21,7 @@ from .author import ClaudeAuthor
 from .goals import Curriculum, Goals, GoalError
 from .tutor import Tutor
 from .learning import plan
+from .models import ModelError, ModelLibrary
 from .planner import ClaudePlanner
 from .service import TutorService
 from .voice import OpenAIRealtime, VoiceError
@@ -60,9 +62,19 @@ class Progress(StrictModel):
     idempotency_key: Annotated[str, Field(pattern=r"^[a-zA-Z0-9_-]{1,40}$")]
 
 
+class LearnerView(StrictModel):
+    """What only the client knows about the learner's screen; bounded and never trusted for scores."""
+    active_beat: Annotated[int, Field(ge=0, le=63)] | None = None
+    sliders: Annotated[dict[Annotated[str, Field(pattern=r"^(param\.[a-df-su-z]|projection\.(angle|length))$")],
+                            Annotated[float, Field(ge=-1000, le=1000)]], Field(max_length=8)] = Field(default_factory=dict)
+    animating: Annotated[str, Field(pattern=r"^param\.[a-df-su-z]$")] | None = None
+    in_vr: bool = False
+
+
 class TutorAction(StrictModel):
     type: Literal["tutor"] = "tutor"
-    action: Literal["goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup", "skip"]
+    view: LearnerView | None = None
+    action: Literal["goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup", "skip", "hint"]
     text: Annotated[str, Field(max_length=2000)] = ""
     expected_epoch: Annotated[int, Field(ge=0)]
 
@@ -86,7 +98,8 @@ class Assessment(StrictModel):
     expected_revision: Annotated[int, Field(ge=0)]
 
 
-def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FROM_ENV, author=FROM_ENV):
+def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FROM_ENV, author=FROM_ENV,
+               models=FROM_ENV):
     @asynccontextmanager
     async def lifespan(app):
         credentials = tokens if tokens is not None else json.loads(os.getenv("LUCID_TOKENS_JSON", "{}"))
@@ -111,6 +124,10 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
                                          Tutor(app.state.graph, goals, planner_fn, app.state.author))
         # None disables voice; text lessons keep working without any provider.
         app.state.voice = OpenAIRealtime.from_env() if voice is FROM_ENV else voice
+        # Catalog 3D models download on first use; prefetching fetches them all at startup.
+        app.state.models = ModelLibrary.from_env() if models is FROM_ENV else models
+        if models is FROM_ENV and os.getenv("LUCID_MODEL_PREFETCH") == "1":
+            app.state.models.prefetch()
         try:
             yield
         finally:
@@ -174,6 +191,26 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
         except VoiceError as exc:
             raise HTTPException(502, str(exc)) from exc
 
+    @app.get("/api/models")
+    def models_catalog(user=Depends(identity)):
+        library = app.state.models
+        if not library:
+            return {"models": []}
+        return {"models": [model.public(library.ready(model.id)) for model in library.catalog.values()]}
+
+    @app.get("/api/models/{model_id}.glb")
+    def model_file(model_id: str, user=Depends(identity)):
+        library = app.state.models
+        if not library or model_id not in library.catalog:
+            raise HTTPException(404, "Unknown model")
+        try:
+            path = library.path(model_id)
+        except (ModelError, OSError, httpx.HTTPError) as exc:
+            raise HTTPException(502, f"Model {model_id} is unavailable: {type(exc).__name__}") from exc
+        # Content is pinned by sha256, so the browser may keep it for good.
+        return FileResponse(path, media_type="model/gltf-binary",
+                            headers={"Cache-Control": "private, max-age=31536000, immutable"})
+
     @app.post("/api/lessons", status_code=201)
     def create_lesson(user=Depends(identity)):
         return app.state.service.create(user)
@@ -197,7 +234,8 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
 
     @app.post("/api/lessons/{lesson_id}/tutor")
     def tutor(lesson_id: str, body: TutorAction, user=Depends(identity)):
-        return app.state.service.tutor_turn(user, lesson_id, body.action, body.text, body.expected_epoch)
+        return app.state.service.tutor_turn(user, lesson_id, body.action, body.text, body.expected_epoch,
+                                            body.view.model_dump() if body.view else None)
 
     @app.get("/api/me")
     def me(user=Depends(identity)):
@@ -300,7 +338,8 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
                     if data.get("type") == "tutor":
                         req = TutorAction.model_validate(data)
                         result = await asyncio.to_thread(service.tutor_turn, user, lesson_id,
-                                                         req.action, req.text, req.expected_epoch)
+                                                         req.action, req.text, req.expected_epoch,
+                                                         req.view.model_dump() if req.view else None)
                         await ws.send_json({"type": "lesson.turn", **result})
                     elif data.get("type") == "turn":
                         req = Turn.model_validate(data)

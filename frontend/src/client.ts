@@ -1,4 +1,4 @@
-import { applyEvents, parsePlan, parseSnapshot, type Plan, type Snapshot } from './protocol';
+import { applyEvents, parsePlan, parseSnapshot, type LearnerView, type Plan, type Snapshot } from './protocol';
 import type { Credential } from './voice';
 
 export class ApiError extends Error {
@@ -39,6 +39,12 @@ export class LessonClient {
       throw new ApiError(`Backend returned ${response.status}.${detail || (response.status === 401 ? ' Check the private token.' : ' Check backend logs and setup.')}`, response.status);
     }
     return response.status === 204 ? undefined as T : response.json();
+  }
+  /** Authenticated download of an immutable asset (catalog 3D models); the browser cache may keep it. */
+  async binary(path: string): Promise<ArrayBuffer> {
+    const response = await fetch(path, { signal: AbortSignal.timeout(60000), headers: { Authorization: `Bearer ${this.token}` } });
+    if (!response.ok) throw new ApiError(`Backend returned ${response.status} for ${path}.`, response.status);
+    return response.arrayBuffer();
   }
   async connect(token: string) {
     if (!token.trim()) throw new Error('Enter the private demo token.');
@@ -145,14 +151,15 @@ export class LessonClient {
     this.deadline = setTimeout(() => this.socket?.close(), 10000);
   }
   /** `goal` turns teach a route step (concept) or show the route map (route_to). */
-  command(type: 'turn' | 'interrupt' | 'tutor', text?: string, extra?: { concept?: string; route_to?: string; action?: string }) {
+  command(type: 'turn' | 'interrupt' | 'tutor', text?: string, extra?: { concept?: string; route_to?: string; action?: string; view?: LearnerView }) {
     if (!this.state || this.busy || this.stopped) throw new Error('Wait for the current command or reconnect.');
     if (type === 'turn' && (!text?.trim() || text.length > 2000)) throw new Error('Enter between 1 and 2,000 characters.');
     if (type === 'tutor' && (text ?? '').length > 2000) throw new Error('Keep it under 2,000 characters.');
     this.send({ type, expected_epoch: this.state.turn_epoch, ...(type === 'interrupt' ? {} : { text: (text ?? '').trim(), ...extra }) });
     this.busy = true; this.awaiting = type === 'interrupt' ? 'snapshot' : 'turn'; this.hooks.status(type === 'interrupt' ? 'Interrupting…' : 'Thinking…', false);
-    // Covers a planner model call plus one corrective retry on the backend.
-    this.deadline = setTimeout(() => { this.hooks.error('Response timed out. Restoring snapshot; the command will not be replayed.'); this.socket?.close(); }, 30000);
+    // A tutor turn can chain model calls (explanation ~10 s, prerequisite lookup, a second
+    // explanation); the backend bounds each call, so this only catches a truly stuck server.
+    this.deadline = setTimeout(() => { this.hooks.error('Response timed out. Restoring snapshot; the command will not be replayed.'); this.socket?.close(); }, type === 'interrupt' ? 30000 : 120000);
   }
   async disconnect() {
     ++this.generation; this.stopped = true;

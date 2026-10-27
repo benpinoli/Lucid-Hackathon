@@ -37,6 +37,18 @@ describe('shared contract and atomic scene state', () => {
     expect(() => parseSnapshot({ ...state, nodes: [{ ...node, content: { ...node.content, end: [Infinity, 0] } }] })).toThrow();
     expect(() => parsePlan({ recipe_id: 'bad', beats: [], code: 'run' })).toThrow();
   });
+  it('accepts catalog models by id only and fills their defaults', () => {
+    const snapshot = parseSnapshot({ ...state, nodes: [{ id: 'fox', content: { primitive: 'model3d', model: 'fox', position: ['p', '0', '0'] } }] });
+    expect(snapshot.nodes[0].content).toEqual({ primitive: 'model3d', model: 'fox', position: ['p', '0', '0'], size: '2', rotation: ['0', '0', '0'], clip: null });
+    expect(() => parseSnapshot({ ...state, nodes: [{ id: 'x', content: { primitive: 'model3d', model: 'https://example.com/x.glb' } }] })).toThrow();
+    expect(() => parseSnapshot({ ...state, nodes: [{ id: 'x', content: { primitive: 'model3d', model: 'fox', url: 'https://example.com' } }] })).toThrow();
+  });
+  it('accepts beat animations and rejects malformed ones', () => {
+    const beat = { beat_id: 'b1', say_text: 'Watch p move.', focus_ids: [], animations: [{ binding: 'param.p', start: 0, end: 2, seconds: 3 }] };
+    expect(parsePlan({ recipe_id: 'diagram_v1', beats: [beat] }).beats[0].animations).toEqual(beat.animations);
+    expect(() => parsePlan({ recipe_id: 'diagram_v1', beats: [{ ...beat, animations: [{ binding: 'param.p', start: 0, end: 2, seconds: 60 }] }] })).toThrow();
+    expect(() => parsePlan({ recipe_id: 'diagram_v1', beats: [{ ...beat, animations: [{ binding: 'param.p', end: 2 }] }] })).toThrow();
+  });
   it('keeps 500 replacements bounded and revision-consistent', () => {
     let current = state;
     for (let i = 1; i <= 500; i++) current = applyEvents(current, [{ ...event, event_id: `event${i}`, turn_epoch: i, seq: i, base_revision: i - 1 }], i);

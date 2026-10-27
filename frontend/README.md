@@ -104,7 +104,9 @@ new lesson; socket loss during a session automatically restores the existing one
   exhausted retries require an explicit new connection. Ambiguous turns are never replayed.
 - Snapshots carry scene state, not teaching plans. A full reload/new session must send
   a new turn to get text. The backend does not broadcast to other sockets.
-- Unknown primitives, executable content and remote assets are rejected. Text is
+- Unknown primitives, executable content and remote assets are rejected; 3D models load only
+  by catalog id from the backend's `/api/models/{id}.glb` (Draco decoder served locally at
+  `/draco/` from three's own files), parsed once and cloned per scene object. Text is
   rendered with `textContent` or canvas. Only the authored vector recipe binds local
   `projection.angle`/`projection.length` values to vector geometry. There is no model call.
 - Local changes are view-only, reset on a received changed snapshot/new turn, and do

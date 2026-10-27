@@ -1,10 +1,10 @@
 {
   "version": 1,
   "provider": "claude_selects_recipe_parameters_when_ANTHROPIC_API_KEY_set_else_local_deterministic",
-  "planner_model": "claude-opus-5-5",
+  "planner_model": "claude-sonnet-5-5",
   "planner_output": "typed_recipe_parameters_only_numbers_and_text_computed_by_recipes",
   "allow_runtime_code": false,
-  "allow_external_assets": false,
+  "allow_external_assets": "catalog_3d_models_only: backend/config/models.json ids, sha256-pinned, cached and served same-origin",
   "allow_automatic_assessments": false,
   "diagnostic_scoring": {"method": "diagnostic_quiz", "correct": 7, "wrong": 2, "not_sure": 1, "confidence": 0.6},
   "known_threshold": 7,
@@ -17,5 +17,6 @@
   "max_scene_objects": 30,
   "max_active_lessons": 128,
   "max_websocket_messages_per_second": 20,
-  "voice": "openai_realtime_webrtc_when_OPENAI_API_KEY_set_else_text_fallback"
+  "voice": "openai_realtime_webrtc_when_OPENAI_API_KEY_set_else_text_fallback",
+  "beat_animation": "slider_moves_resolved_and_view_checked_by_compiler_played_while_beat_is_spoken"
 }

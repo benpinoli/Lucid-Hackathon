@@ -3,7 +3,8 @@ import { typeset } from './math';
 import { ShadowStory } from './shadow';
 import { LessonClient } from './client';
 import { LessonRenderer } from './renderer';
-import { localProjection, type Plan, type Snapshot, type TutorState } from './protocol';
+import { ModelCache, type ModelInfo } from './models';
+import { localProjection, type Beat, type LearnerView, type Plan, type Snapshot, type TutorState } from './protocol';
 import { connectVoice, VoiceNarrator, type VoiceConnection } from './voice';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
@@ -16,7 +17,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <section class="tutor" aria-label="Tutor">
         <section id="learning-day" hidden aria-label="Your learning day"><label>Your learning day</label><p class="hint">Learn something new, or start with a short retrieval warm-up.</p><div class="row wrap"><button id="learn-new" type="button" class="quiet">Learn something new</button><button id="warmup" type="button">Review due topics</button></div><p id="review-status" class="hint" role="status"></p><div id="review-topics"></div></section>
       <form id="goal"><label for="goal-text">What do you want to learn?</label><input id="goal-text" type="text" maxlength="500" placeholder="e.g. Fourier transforms" required /><label class="check"><input id="adaptive-route" type="checkbox" /> Use memory to skip familiar prerequisites</label><div class="row"><button id="goal-start" disabled>Start learning</button></div><p class="hint">Start from the beginning by default. Your saved knowledge stays intact.</p><p id="topic-status" class="hint" role="status"></p></form>
-        <form id="reply" hidden><label for="reply-text" id="reply-label">Your answer</label><input id="reply-text" type="text" maxlength="2000" autocomplete="off" /><div class="row wrap"><button id="reply-send">Answer</button><button id="confused" type="button" class="quiet">I'm confused</button><button id="continue" type="button" class="quiet">Continue</button></div><p class="hint">With voice on, just talk: answer, ask, or say what's unclear.</p></form>
+        <form id="reply" hidden><label for="reply-text" id="reply-label">Your answer</label><input id="reply-text" type="text" maxlength="2000" autocomplete="off" /><div class="row wrap"><button id="reply-send">Answer</button><button id="confused" type="button" class="quiet">I'm confused</button><button id="hint" type="button" class="quiet">Hint</button><button id="continue" type="button" class="quiet">Continue</button></div><p class="hint">With voice on, just talk: answer, ask, or say what's unclear.</p></form>
       </section>
       <form id="turn"><label for="question">Or explore any concept freely</label><textarea id="question" maxlength="2000" rows="3">Explain dot product</textarea><div class="row"><button id="send" disabled>Explore concept <span>↗</span></button><button id="interrupt" type="button" class="quiet" disabled>Interrupt</button></div></form>
       <section class="voice" aria-label="Voice tutor"><label>Voice tutor</label><div class="row"><button id="voice" type="button" class="quiet" disabled>Start voice</button><button id="mute" type="button" class="quiet" disabled aria-pressed="false">Mute mic</button></div><label class="check"><input id="barge-in" type="checkbox" /> Interrupt by talking (use headphones)</label><p class="hint">Otherwise the mic opens when the tutor finishes. To cut in, press Interrupt or pull the VR trigger.</p><p id="voice-status" class="hint" role="status">Connect first. Voice also needs OPENAI_API_KEY on the backend.</p></section>
@@ -30,9 +31,10 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <div id="viewport"><div id="empty"><span>01 / VECTOR LAB</span><h2>A new perspective<br>starts here.</h2><p>Connect your backend to bring the lesson into view.</p></div></div>
       <section id="math-panel" aria-label="Lesson equations" hidden></section>
       <p id="scene-caption" class="scene-caption" aria-live="polite"></p>
-      <div id="playback" class="row wrap" hidden><button id="play-animation" type="button">Play animation</button><button id="restart-animation" type="button" class="quiet">Reset parameters</button><label for="animation-parameter">Animate</label><select id="animation-parameter"></select><label for="animation-speed">Speed</label><select id="animation-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></div>
+      <div id="playback" class="row wrap" hidden><button id="play-animation" type="button">Sweep freely</button><button id="restart-animation" type="button" class="quiet">Reset parameters</button><label for="animation-parameter">Animate</label><select id="animation-parameter"></select><label for="animation-speed">Speed</label><select id="animation-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></div>
       <div class="row wrap" aria-label="Scene manipulation"><label for="manipulation">Interaction</label><select id="manipulation"><option value="orbit">Orbit camera</option><option value="translate">Move model</option><option value="rotate">Rotate model</option></select><label class="check"><input id="whole-model" type="checkbox" checked /> Whole model</label><button id="reset-arrangement" type="button" class="quiet">Reset arrangement</button></div>
       <div class="scene-bottom"><div class="legend" id="legend"><span>● u / projection</span><span>● v</span></div><span>Drag to orbit · Scroll to zoom</span></div>
+      <p id="model-credits" class="hint" hidden></p>
       <section id="sliders" aria-label="Local scene controls"></section>
       <div class="diagnostics"><span id="metrics">Renderer starting…</span><span>Scene schema v1</span></div>
       <p class="xr-note">VR: point at the model and squeeze the grip to grab, move, and rotate it; release to place it. Hand-tracked pinch also grabs when supported. Whole model keeps the diagram together; uncheck it to move individual objects. Use the trigger for slider buttons. Desktop: choose Move or Rotate for handles, or Orbit to look around.</p>
@@ -50,14 +52,35 @@ let plan: Plan | undefined;
 let projectionModel = false;
 const story = new ShadowStory(element('shadow-story'));
 let playing = false;
+let activeBeat: number | null = null; // The step the learner selected or the narrator is on.
 let animationTime = 0;
 let animationFrame = 0;
 let animationPhase = 0;
 let animationBinding = '';
-const parameterUpdates = new Map<string, (value: number) => void>();
+let beatFrame = 0;
+// fromBeat: a narrated animation keeps the beat's highlight; a learner's drag clears it.
+const parameterUpdates = new Map<string, (value: number, fromBeat?: boolean) => void>();
 function pauseAnimation() {
-  playing = false; cancelAnimationFrame(animationFrame);
-  element('play-animation').textContent = 'Play animation';
+  playing = false; cancelAnimationFrame(animationFrame); cancelAnimationFrame(beatFrame);
+  element('play-animation').textContent = 'Sweep freely';
+}
+/** Plays the slider moves a beat describes, eased, while that beat is spoken or selected. */
+function playBeat(beat?: Beat) {
+  const moves = (beat?.animations ?? []).filter(move => parameterUpdates.has(move.binding));
+  if (!moves.length) return;
+  pauseAnimation();
+  const started = performance.now();
+  const step = (now: number) => {
+    let running = false;
+    for (const move of moves) {
+      const k = Math.min(1, Math.max(0, now - started) / (move.seconds * 1000));
+      const eased = k < 0.5 ? 2 * k * k : 1 - (2 - 2 * k) ** 2 / 2;
+      parameterUpdates.get(move.binding)!(move.start + (move.end - move.start) * eased, true);
+      running ||= k < 1;
+    }
+    if (running) beatFrame = requestAnimationFrame(step);
+  };
+  beatFrame = requestAnimationFrame(step);
 }
 function animateFrame(time: number) {
   if (!playing) return;
@@ -122,10 +145,10 @@ function renderSliders() {
     const label = document.createElement('label'); label.textContent = name;
     const output = document.createElement('output'); output.textContent = `${c.value.toFixed(projection ? 1 : 2)}${unit}`;
     const input = document.createElement('input'); input.type = 'range'; input.min = String(c.minimum); input.max = String(c.maximum); input.step = String(step); input.value = String(c.value); input.setAttribute('aria-label', name);
-    const update = (value: number) => {
+    const update = (value: number, fromBeat = false) => {
       const bounded = Math.min(c.maximum, Math.max(c.minimum, value));
       overrides.set(c.binding, bounded); input.value = String(bounded); output.textContent = `${bounded.toFixed(projection ? 1 : 2)}${unit}`;
-      renderer?.setFocus([]);
+      if (!fromBeat) renderer?.setFocus([]);
       draw();
     };
     parameterUpdates.set(c.binding, update);
@@ -135,7 +158,7 @@ function renderSliders() {
     if (!xrBound) { xrBound = true; renderer?.setXRSlider(direction => update(Number(input.value) + direction * (projection ? 5 : (c.maximum - c.minimum) / 20)), projection ? 'angle' : name); }
   }
   element('playback').hidden = parameterUpdates.size === 0;
-  if (root.childElementCount) { const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = 'Press Play to see the parameter change, or drag a slider. Animation runs locally; spoken example values describe the starting state.'; root.append(hint); }
+  if (root.childElementCount) { const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = 'Each step of the explanation animates what it describes; select a step to replay it. Drag a slider or sweep freely to explore. Animation runs locally.'; root.append(hint); }
 }
 // Primary (teal) and secondary (orange) style meanings per authored recipe.
 const legends: Record<string, string[]> = {
@@ -145,6 +168,7 @@ const legends: Record<string, string[]> = {
   mean_value_v1: ['f(x)', 'secant ∥ tangent'],
 };
 function showBeats(value?: Plan) {
+  activeBeat = null;
   plan = value; const root = element('beats'); root.replaceChildren();
   if (value) element('legend').replaceChildren(...(legends[value.recipe_id] ?? []).map(text => Object.assign(document.createElement('span'), { textContent: `● ${text}` })));
   renderer?.setFocus([]); renderer?.setCaption('');
@@ -174,9 +198,11 @@ function showBeats(value?: Plan) {
 }
 function selectBeat(index: number) {
   const beat = plan?.beats[index]; if (!beat) return;
+  activeBeat = index;
   element('beats').querySelectorAll('button').forEach((button, i) => { if (i === index) button.setAttribute('aria-pressed', 'true'); else button.removeAttribute('aria-pressed'); });
   renderer?.setFocus(beat.focus_ids); renderer?.setCaption(beat.say_text);
   typeset(element('scene-caption'), beat.say_text);
+  playBeat(beat);
 }
 let voice: VoiceConnection | undefined;
 let muted = false;
@@ -189,7 +215,7 @@ const narrator = new VoiceNarrator({
   send: event => voice?.send(event),
   tutor: (action, text) => new Promise<Plan>((resolve, reject) => {
     pendingVoiceTurn?.reject(new Error('Superseded by a newer request'));
-    client.command('tutor', text, { action });
+    client.command('tutor', text, { action, view: learnerView() });
     pendingVoiceTurn = { resolve, reject };
   }),
   focusBeat: selectBeat,
@@ -219,13 +245,16 @@ const client = new LessonClient({
     if (snapshot && (value.lesson_id !== snapshot.lesson_id || value.turn_epoch !== snapshot.turn_epoch)) showBeats();
     snapshot = value; overrides.clear(); element('empty').hidden = value.nodes.length > 0;
     element('scene-meta').textContent = `Epoch ${value.turn_epoch} · revision ${value.scene_revision} · ${value.nodes.length} objects`;
-    draw(); renderSliders();
+    draw(); renderSliders(); showCredits();
   },
   plan: value => {
     const key = value.concept_id ?? value.recipe_id;
     if (key !== visualKey) { renderer?.beginScene(); draw(); visualKey = key; }
     showBeats(value); renderSliders(); showTutor(value);
     void refreshReviews();
+    // With voice, the narrator starts each beat's animation as it speaks. Otherwise play the first
+    // beat that moves (tutor steps usually lead with spoken intro lines that do not).
+    if (!voice) playBeat(value.beats.find(beat => beat.animations?.length));
     if (pendingVoiceTurn) { pendingVoiceTurn.resolve(value); pendingVoiceTurn = undefined; }
     else if (voice) narrator.introduce(value);
   },
@@ -234,6 +263,14 @@ const client = new LessonClient({
     pendingVoiceTurn?.reject(new Error(text)); pendingVoiceTurn = undefined;
   },
 });
+const models = new ModelCache(path => client.binary(path));
+renderer?.setModels(models);
+function showCredits() {
+  const ids = (snapshot?.nodes ?? []).flatMap(node => node.visible && node.content.primitive === 'model3d' ? [node.content.model] : []);
+  const credits = models.credits(ids);
+  element('model-credits').textContent = credits.length ? `3D models · ${credits.join(' · ')}` : '';
+  element('model-credits').hidden = !credits.length;
+}
 element('connection').addEventListener('submit', async event => {
   event.preventDefault(); clearError(); element<HTMLButtonElement>('connect').disabled = true;
   try {
@@ -241,6 +278,9 @@ element('connection').addEventListener('submit', async event => {
     element('topic-status').textContent = client.authorAvailable ? 'Topic writer configured. Ask for a new topic to generate a diagram lesson.' : 'Built-in lessons ready. New topics need ANTHROPIC_API_KEY in the backend terminal, then a backend restart.';
     element<HTMLButtonElement>('goal-start').disabled = false;
     element('learning-day').hidden = false; void refreshReviews();
+    // Warm the 3D model cache so lessons that use a model show it without waiting.
+    void client.api<{ models: ModelInfo[] }>('GET', '/api/models')
+      .then(catalog => { models.setCatalog(catalog.models); showCredits(); return models.warm(); }).catch(() => undefined);
     voiceStatus(client.voiceAvailable ? 'Voice is available. Start voice, then ask about a topic out loud.' : 'Voice is off: the backend has no OPENAI_API_KEY. Text lessons work normally.');
     updateVoiceControls();
   }
@@ -257,16 +297,26 @@ element('turn').addEventListener('submit', event => { event.preventDefault(); tu
 let tutorState: TutorState | null = null;
 function tutor(action: string, text = '') {
   clearError();
-  try { client.command('tutor', text, { action }); } catch (e) { error((e as Error).message); }
+  try { client.command('tutor', text, { action, view: learnerView() }); } catch (e) { error((e as Error).message); }
+}
+/** What the learner is looking at that only the client knows, so explanations can build on it. */
+function learnerView(): LearnerView {
+  const sliders: Record<string, number> = {};
+  for (const [binding, value] of overrides) {
+    if (Number.isFinite(value) && Object.keys(sliders).length < 8) sliders[binding] = Math.round(value * 1000) / 1000;
+  }
+  const animating = playing && /^param\.[a-df-su-z]$/.test(animationBinding) ? animationBinding : null;
+  return { active_beat: activeBeat !== null && activeBeat < 64 ? activeBeat : null, sliders, animating, in_vr: renderer?.presenting ?? false };
 }
 function showTutor(value: Plan) {
   if (!value.tutor) return;
   tutorState = value.tutor;
   element('reply').dataset.exercise = value.tutor.exercise ?? '';
+  element('reply').dataset.step = value.tutor.total_steps ? `${value.tutor.step}/${value.tutor.total_steps}` : '';
   const awaiting = value.tutor.awaiting_answer;
   element('reply').hidden = false;
   element('reply-label').textContent = awaiting ? 'Your answer' : 'Ask the tutor anything';
-  if (value.tutor.exercise && value.tutor.exercise !== 'check' && value.tutor.exercise !== 'diagnostic') element('reply-label').textContent = `Your answer · ${value.tutor.exercise.startsWith('prediction') ? 'Predict and explain' : value.tutor.exercise === 'synthesis' ? 'Connect the ideas' : value.tutor.exercise === 'teachback' ? 'Teach it back' : 'Recall from memory'}`;
+  if (value.tutor.exercise && !['check', 'diagnostic', 'experience'].includes(value.tutor.exercise)) element('reply-label').textContent = `Your answer · ${value.tutor.exercise.startsWith('prediction') ? 'Predict and explain' : value.tutor.exercise === 'synthesis' ? 'Connect the ideas' : value.tutor.exercise === 'teachback' ? 'Teach it back' : 'Recall from memory'}`;
   element('reply-send').textContent = awaiting ? 'Answer' : 'Ask';
 }
 element('goal').addEventListener('submit', event => { event.preventDefault(); tutor(element<HTMLInputElement>('adaptive-route').checked ? 'goal' : 'explore', element<HTMLInputElement>('goal-text').value); });
@@ -278,6 +328,7 @@ element('reply').addEventListener('submit', event => {
 });
 element('confused').onclick = () => { const input = element<HTMLInputElement>('reply-text'); tutor('confused', input.value || "I don't understand this part."); input.value = ''; };
 element('continue').onclick = () => tutor('continue');
+element('hint').onclick = () => tutor('hint');
 for (const action of ['review', 'deeper', 'recall', 'skip']) {
   const button = document.createElement('button');
   button.type = 'button'; button.className = 'quiet';
@@ -343,7 +394,7 @@ element('view-model').onclick = () => projectionView(true);
 element('play-animation').onclick = () => {
   if (playing) { pauseAnimation(); return; }
   animationBinding = '';
-  playing = true; animationTime = performance.now(); element('play-animation').textContent = 'Pause animation';
+  playing = true; animationTime = performance.now(); element('play-animation').textContent = 'Pause sweep';
   animationFrame = requestAnimationFrame(animateFrame);
 };
 element('restart-animation').onclick = () => {

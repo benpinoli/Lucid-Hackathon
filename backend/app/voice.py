@@ -27,11 +27,15 @@ tool with the learner's own words, then let the app read its steps aloud:
 - action recall: they want to test their memory of a named topic without seeing its explanation.
 - action warmup: they want the suggested spaced-repetition warm-up.
 - action skip: they explicitly want to skip a question. Never treat silence as permission to skip.
+- action hint: they ask for a hint, say they're stuck, or say yes to "Want a hint?".
+After "Ready for the next piece?" (or similar), a yes ("sure", "yeah", "ready") is action continue.
 The tutor deliberately pauses after small steps. Wait for an answer; never automatically continue
 past a prediction, synthesis task, or teach-back question. Effortful thinking is part of learning.
 Learners often pause to think mid-answer: wait until they have clearly finished before calling
 the tool. When you call it, you may first say one very short acknowledgement such as "Let me see."
-When asked to read a script, say exactly that text and nothing else, then stop and listen.
+When asked to read a script, follow its rules exactly: lines starting with "~" are conversational
+cues you say naturally in your own words (same meaning, a few words, matching how the learner
+sounded); every other line is read word for word. Then stop and listen. Keep everything short.
 The learner controls the goal and may always review, go deeper, or change topics.
 Never speak internal scores or traversal costs."""
 
@@ -43,7 +47,7 @@ TOOLS = [{
     "parameters": {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup", "skip"]},
+            "action": {"type": "string", "enum": ["goal", "answer", "confused", "question", "continue", "explore", "review", "deeper", "recall", "warmup", "skip", "hint"]},
             "text": {"type": "string", "description": "The learner's words, as close to verbatim as possible."},
         },
         "required": ["action", "text"],

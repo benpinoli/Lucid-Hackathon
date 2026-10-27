@@ -1,5 +1,37 @@
 {
   "$defs": {
+    "BeatAnimation": {
+      "additionalProperties": false,
+      "description": "Move one slider from `start` to `end` while its beat is spoken (equal values hold it there).",
+      "properties": {
+        "binding": {
+          "title": "Binding",
+          "type": "string"
+        },
+        "start": {
+          "title": "Start",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "number"
+        },
+        "seconds": {
+          "default": 3.0,
+          "maximum": 12,
+          "minimum": 0.5,
+          "title": "Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "binding",
+        "start",
+        "end"
+      ],
+      "title": "BeatAnimation",
+      "type": "object"
+    },
     "TeachingBeat": {
       "additionalProperties": false,
       "properties": {
@@ -27,6 +59,14 @@
           "default": true,
           "title": "Allow Interrupt",
           "type": "boolean"
+        },
+        "animations": {
+          "items": {
+            "$ref": "#/$defs/BeatAnimation"
+          },
+          "maxItems": 3,
+          "title": "Animations",
+          "type": "array"
         }
       },
       "required": [

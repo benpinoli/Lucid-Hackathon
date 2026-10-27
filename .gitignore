@@ -22,3 +22,4 @@ frontend/playwright-report/
 *.pem
 .npm-cache/
 .playwright/
+backend/model_cache/
