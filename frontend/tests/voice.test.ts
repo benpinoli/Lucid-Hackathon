@@ -192,18 +192,22 @@ describe('conversational speech', () => {
     { beat_id: 'l0', say_text: 'The slope between two points is rise over run.', focus_ids: ['rule'] },
     { beat_id: 'check', say_text: 'What is the slope from (1, 2) to (3, 8)?', focus_ids: [] },
   ] };
+  // A reaction and a question with no lesson step: asked straight away.
+  const question: Plan = { ...turn, beats: [turn.beats[0], turn.beats[2]] };
 
   it('lets the voice phrase reactions freely but reads lessons and questions word for word', () => {
     const { narrator, creates } = setup();
     narrator.narrate(turn);
     const script = creates()[0].response.instructions as string;
-    expect(script).toContain('~ Exactly, 2x.\n\nThe slope between two points is rise over run.\n\nWhat is the slope from (1, 2) to (3, 8)?');
+    expect(script).toContain('~ Exactly, 2x.\n\nThe slope between two points is rise over run.');
     expect(script).toContain('Read every other paragraph exactly as written');
+    narrator.narrate(question);
+    expect(creates()[1].response.instructions).toContain('~ Exactly, 2x.\n\nWhat is the slope from (1, 2) to (3, 8)?');
   });
 
   it('offers one hint after a long silence, never moving on by itself', () => {
     const { narrator, creates, play, finish } = setup();
-    narrator.narrate(turn); play('r1'); finish('r1');
+    narrator.narrate(question); play('r1'); finish('r1');
     vi.advanceTimersByTime(19000);
     expect(creates()).toHaveLength(1);
     vi.advanceTimersByTime(1500);
@@ -216,10 +220,47 @@ describe('conversational speech', () => {
 
   it('does not nudge a learner who has started answering', () => {
     const { narrator, creates, play, finish } = setup();
-    narrator.narrate(turn); play('r1'); finish('r1');
+    narrator.narrate(question); play('r1'); finish('r1');
     vi.advanceTimersByTime(5000);
     narrator.handle({ type: 'input_audio_buffer.speech_started' });
     vi.advanceTimersByTime(60000);
     expect(creates()).toHaveLength(1);
+  });
+
+  it('says the step, lets the learner look while it moves, then asks', () => {
+    const moving: Plan = { ...turn, beats: [turn.beats[0],
+      { beat_id: 'l0', say_text: 'Watch the point slide.', focus_ids: ['p'], animations: [{ binding: 'param.p', start: 0, end: 2, seconds: 6 }] },
+      turn.beats[2]] };
+    const { narrator, creates, play, finish, statuses, focused, mic } = setup();
+    narrator.narrate(moving);
+    expect(creates()[0].response.instructions).not.toContain('What is the slope');
+    play('r1'); finish('r1');
+    expect(statuses.at(-1)).toBe('Take a look…');
+    vi.advanceTimersByTime(400);
+    expect(mic.at(-1)).toBe(true);  // the learner may speak during the pause
+    // 22 characters take ~1.5 s at 15 chars/s; the 6 s animation outlasts that, so the pause is 2.5 + 4.5 s.
+    vi.advanceTimersByTime(6500);
+    expect(creates()).toHaveLength(1);
+    vi.advanceTimersByTime(200);
+    expect(creates()).toHaveLength(2);
+    expect(creates()[1].response.instructions).toContain('What is the slope from (1, 2) to (3, 8)?');
+    play('r2');
+    expect(focused.at(-1)).toBe(2);  // the question keeps its place in the steps list
+    finish('r2');
+    expect(statuses.at(-1)).toBe('Your turn. Take your time.');
+  });
+
+  it('holds the question while the learner talks during the look pause', () => {
+    const { narrator, creates, play, finish } = setup();
+    narrator.narrate(turn); play('r1'); finish('r1');
+    narrator.handle({ type: 'input_audio_buffer.speech_started' });
+    vi.advanceTimersByTime(20000);
+    expect(creates()).toHaveLength(1);
+    // The model answered them out loud; once that stops, the question still comes.
+    narrator.handle({ type: 'output_audio_buffer.started', response_id: 'chat' });
+    narrator.handle({ type: 'output_audio_buffer.stopped', response_id: 'chat' });
+    vi.advanceTimersByTime(2500);
+    expect(creates()).toHaveLength(2);
+    expect(creates()[1].response.instructions).toContain('What is the slope');
   });
 });

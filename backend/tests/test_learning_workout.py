@@ -36,7 +36,7 @@ class PracticeAuthor:
     def grade(self, *args):
         return "correct", "Good reasoning."
 
-    def explain(self, *args):
+    def explain(self, *args, **kwargs):
         return Written(compile_lesson(AUTHORED["derivatives"]), self.question("", ""), None)
 
 
@@ -55,14 +55,17 @@ def test_small_steps_end_without_a_quick_check(workout):
     target = curriculum.ids["derivatives"]
     s = Session(target=target)
     first = tutor._teach(s, human.human_id, target, [])
-    assert s.question.kind == "prediction" and len(first.beats) == 2
-    assert first.beats[-1].say_text == s.question.prompt  # the question is the hand-off, said last
+    # One note per turn: the step and a check-in, then wait. The question is its own turn.
+    assert s.question is None and s.step_check and len(first.beats) == 1 and first.beats[0].say_text.endswith("?")
+    assert not author.practices
+    asked = tutor.act(s, human.human_id, "answer", "yes, got it")
+    assert s.question.kind == "prediction" and [b.say_text for b in asked.beats] == [s.question.prompt]
     assert len(author.practices[-1][3]) == 1
     remaining = len(s.remaining_beats)
     tutor.act(s, human.human_id, "continue")
     assert len(s.remaining_beats) == remaining
-    while s.question:
-        tutor.act(s, human.human_id, "answer", "my reasoning")
+    while s.question or s.step_check:
+        tutor.act(s, human.human_id, *(("answer", "my reasoning") if s.question else ("continue",)))
     # The last step asks nothing: predictions between steps only, and no mastery is claimed.
     assert not s.remaining_beats and {kind for kind, *_ in author.practices} == {"prediction"}
     assert target not in human.snapshot().nodes
@@ -132,6 +135,7 @@ def test_wrong_microanswer_gets_correction_before_advancing(workout):
     _, curriculum, human, tutor, author = workout
     s = Session(target=curriculum.ids["derivatives"])
     tutor._teach(s, human.human_id, s.target, [])
+    tutor.act(s, human.human_id, "continue")
     before, question = len(s.remaining_beats), s.question
     author.score = 3
     tutor.act(s, human.human_id, "answer", "a mistake")
@@ -157,12 +161,16 @@ def test_authored_offline_lessons_also_pause_and_microchecks_do_not_claim_master
     tutor.author = None
     s = Session(target=curriculum.ids["derivatives"])
     tutor._teach(s, human.human_id, s.target, [])
+    tutor.act(s, human.human_id, "continue")
     assert s.question.kind == "prediction_choice"
     tutor.act(s, human.human_id, "answer", "A")
     assert not human.snapshot().nodes
     assert tutor.reviews.suggestions(human.human_id)["practice_by_kind"]["prediction_choice"] == 1
-    assert s.question is None and s.remaining_beats  # explicit self-explanation pause
-    tutor.act(s, human.human_id, "continue")
+    assert s.question is None and s.remaining_beats and s.step_check  # step 2 checks in, then waits
+    tutor.act(s, human.human_id, "continue")  # offline, step 2 has no question: on to step 3
+    assert s.question is None
+    while s.remaining_beats:
+        tutor.act(s, human.human_id, "continue")
     assert s.question is None and not s.remaining_beats  # no quick check after the last step
 
 
@@ -293,10 +301,22 @@ def test_hints_point_back_to_the_step_then_move_on_without_scoring(workout):
     tutor.phrasing = Phrasing(variety=False, seed=0)
     s = Session(target=curriculum.ids["derivatives"])
     tutor._teach(s, human.human_id, s.target, [])
+    tutor.act(s, human.human_id, "continue")
     q, before = s.question, len(s.remaining_beats)
     hinted = tutor.act(s, human.human_id, "hint")
-    assert s.question is q and [b.say_text for b in hinted.beats] == ["Here's a hint.", s.taught_beats[-1], q.prompt]
+    assert s.question is q and [b.say_text for b in hinted.beats] == [f"Here's a hint. {s.taught_beats[-1]} {q.prompt}"]
     revealed = tutor.act(s, human.human_id, "hint")
     # The expected answer is a rubric, so it is never read out: the next step shows the idea.
-    assert revealed.beats[0].say_text == "Let's see it in the next step." and len(s.remaining_beats) == before - 1
+    assert revealed.beats[0].say_text.startswith("Let's see it in the next step. ") and len(s.remaining_beats) == before - 1
     assert not human.snapshot().nodes and tutor.reviews.suggestions(human.human_id)["practice_attempts"] == 0
+
+
+def test_a_no_to_the_check_in_explains_that_step_again(workout):
+    _, curriculum, human, tutor, _ = workout
+    s = Session(target=curriculum.ids["derivatives"])
+    tutor._teach(s, human.human_id, s.target, [])
+    assert s.step_check
+    again = tutor.act(s, human.human_id, "answer", "not really")
+    # Explained afresh from its first step (not graded), which checks in again.
+    assert s.question is None and s.step_check and len(s.taught_beats) == 1 and len(again.beats) == 1
+    assert s.current == curriculum.ids["derivatives"] and not human.snapshot().nodes

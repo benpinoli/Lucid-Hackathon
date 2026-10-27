@@ -11,7 +11,7 @@ import os
 from typing import Literal
 
 import anthropic
-from pydantic import BaseModel, ConfigDict, create_model
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model
 
 from .learning import LessonError, LessonPlan, complex_quadratic_lesson, dijkstra_lesson, mean_value_lesson, plan, vector_projection
 
@@ -25,9 +25,16 @@ EXPLAIN_TIMEOUT = 60.0
 
 
 def describe_failure(exc) -> str:
-    """API errors carry the provider's reason (never learner text); others log only their type."""
+    """API errors carry the provider's reason, and LUCID's own validation says what was wrong
+    (neither contains learner text); anything else logs only its type."""
     if isinstance(exc, anthropic.APIStatusError):
         return f"{type(exc).__name__} {exc.status_code}: {exc.message}"
+    if isinstance(exc, LessonError):  # Includes DiagramError: messages LUCID wrote about model output.
+        return f"{type(exc).__name__}: {str(exc)[:300]}"
+    if isinstance(exc, ValidationError):
+        first = exc.errors()[0] if exc.errors() else {}
+        where = ".".join(str(part) for part in first.get("loc", ()))
+        return f"ValidationError ({exc.error_count()} problems, first at {where}: {first.get('msg', '')})"[:300]
     return type(exc).__name__
 
 SYSTEM = """You choose the visual lesson for LUCID, a 3D math tutor. Given what a learner asked,

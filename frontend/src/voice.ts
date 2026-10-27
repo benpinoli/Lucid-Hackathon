@@ -1,7 +1,7 @@
 import type { Plan } from './protocol';
 
 export type RealtimeEvent = { type: string; [key: string]: unknown };
-const ACTIONS = ['goal', 'answer', 'confused', 'question', 'continue', 'explore', 'review', 'deeper', 'recall', 'warmup', 'skip'];
+const ACTIONS = ['goal', 'answer', 'confused', 'question', 'continue', 'explore', 'review', 'deeper', 'recall', 'warmup', 'skip', 'hint'];
 type Hooks = {
   send: (event: object) => void;
   /** Sends the learner's words to the tutor; resolves with the reply (diagram + steps). */
@@ -14,6 +14,7 @@ type Hooks = {
 };
 type Response = { id?: string; status?: string; metadata?: Record<string, string> | null; output?: { type?: string; name?: string; call_id?: string; arguments?: string }[] };
 type Script = { tag: string; beats: string[]; first: number; awaiting: boolean; id?: string; startedAt?: number };
+type Later = { beats: string[]; first: number; awaiting: boolean; ms: number };
 
 const SCRIPT_PROMPT = 'Speak the following script at a calm teaching pace, with a short natural pause between paragraphs. '
   + 'Paragraphs starting with "~" are conversational cues: say each in your own words, keeping its meaning and roughly its '
@@ -26,6 +27,8 @@ const NUDGES = ['Take your time. Want a hint?', 'No rush. Would a hint help?', '
 const PARAGRAPH_PAUSE = 0.35; // seconds of pause assumed between beats
 const TAIL_MS = 350; // keep the mic closed briefly after playback so trailing echo is not heard
 const SLACK_MS = 4000; // if the drain event never arrives, reopen this long after the estimate
+const LOOK_MS = 2500; // silence between a lesson step and its question, to look at the picture
+const MAX_LOOK_MS = 8000;
 
 /**
  * Speaks each tutor reply as one continuous response and owns turn-taking. Pure event state
@@ -47,10 +50,37 @@ export class VoiceNarrator {
   private micOpen = true;
   private nudgeTimer?: ReturnType<typeof setTimeout>;
   private nudged = false;
+  private later?: Later;
+  private lookTimer?: ReturnType<typeof setTimeout>;
   constructor(private hooks: Hooks) {}
 
-  /** Speak a whole reply: explanation and any question, without gaps. */
-  narrate(plan: Plan) { this.nudged = false; this.speak(plan.beats.map(cue), 0, !!plan.tutor?.awaiting_answer); }
+  /**
+   * Speak a whole reply as one response. A lesson step and its question are separate: the step,
+   * then a silence while its animation finishes and the learner looks, then the question.
+   */
+  narrate(plan: Plan) {
+    this.nudged = false;
+    const beats = plan.beats.map(cue), awaiting = !!plan.tutor?.awaiting_answer;
+    const ask = plan.beats.findIndex(beat => beat.beat_id === 'check');
+    const teaches = ask > 0 && plan.beats.slice(0, ask).some(beat => /^l\d/.test(beat.beat_id));
+    this.speak(teaches ? beats.slice(0, ask) : beats, 0, teaches ? false : awaiting);
+    this.later = teaches ? { beats: beats.slice(ask), first: ask, awaiting, ms: this.lookTime(plan.beats[ask - 1]) } : undefined;
+  }
+  private lookTime(beat: Plan['beats'][number]) {
+    const moving = (beat.animations ?? []).reduce((sum, animation) => sum + animation.seconds, 0);
+    const spoken = beat.say_text.length / this.charsPerSecond;
+    return Math.min(MAX_LOOK_MS, LOOK_MS + Math.max(0, moving - spoken) * 1000);
+  }
+  /** Ask the held-back question once nothing else is speaking. */
+  private askLater(ms: number) {
+    clearTimeout(this.lookTimer);
+    this.lookTimer = setTimeout(() => {
+      const later = this.later;
+      if (!later || this.script || this.requested || this.responseActive || this.playing.size) return;
+      this.later = undefined;
+      this.speak(later.beats, later.first, later.awaiting);
+    }, ms);
+  }
   /** Speak one beat only, e.g. when the learner selects it. */
   speakBeat(plan: Plan, index: number) { this.speak([cue(plan.beats[index])], index, false); }
   /** Tell the model about a lesson it did not request, so follow-up questions have context. */
@@ -64,6 +94,7 @@ export class VoiceNarrator {
   /** Abandon the current script and cut any audio still playing. */
   stop() {
     clearTimeout(this.nudgeTimer);
+    clearTimeout(this.lookTimer);
     this.drop();
     if (this.responseActive) this.hooks.send({ type: 'response.cancel' });
     if (this.playing.size) this.hooks.send({ type: 'output_audio_buffer.clear' });
@@ -78,6 +109,7 @@ export class VoiceNarrator {
         // With the mic closed this can only be echo of the tutor's own voice: ignore it.
         if (this.script && !this.bargeIn) break;
         clearTimeout(this.nudgeTimer); // The learner is answering.
+        clearTimeout(this.lookTimer); // or asking about the step: the question waits.
         if (this.script) this.drop(); // Barge-in: the provider truncates its own audio.
         this.hooks.status('Listening…');
         break;
@@ -95,7 +127,11 @@ export class VoiceNarrator {
       case 'output_audio_buffer.stopped': case 'output_audio_buffer.cleared':
         if (id) this.playing.delete(id);
         if (id && id === this.script?.id) this.finish(event.type === 'output_audio_buffer.stopped');
-        else this.pump();
+        else {
+          this.pump();
+          // The model answered something said during the look pause; the question still comes.
+          if (this.later && !this.script) this.askLater(LOOK_MS);
+        }
         this.updateMic();
         break;
       case 'response.done':
@@ -165,6 +201,11 @@ export class VoiceNarrator {
     }
     const awaiting = !!script?.awaiting;
     this.drop();
+    if (this.later) {
+      this.hooks.status('Take a look…');
+      this.askLater(this.later.ms);
+      return;
+    }
     this.hooks.status(awaiting ? 'Your turn. Take your time.' : 'Listening…');
     // Silence is thinking time: never move on, but offer a hint once if it runs long.
     if (awaiting && !this.nudged) this.nudgeTimer = setTimeout(() => this.nudge(), NUDGE_MS);

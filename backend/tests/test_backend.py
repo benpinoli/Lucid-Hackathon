@@ -748,12 +748,14 @@ class FakeAuthor:
     def __init__(self, prerequisite=None):
         self.prerequisite, self.calls = prerequisite, []
 
-    def explain(self, concept, description, context, request=None, screen=None, memory=None):
+    def explain(self, concept, description, context, request=None, screen=None, memory=None, avoid=None, after=None,
+                draw_breakdowns=True):
         self.calls.append(("explain", concept, request))
-        self.screen, self.memory = screen, memory
+        self.screen, self.memory, self.avoid, self.after = screen, memory, avoid, after
         plan = compile_lesson(AUTHORED["functions"], recipe_id="generated_v1", generated=True)
+        prerequisites = self.prerequisite if isinstance(self.prerequisite, list) else [self.prerequisite]
         return Written(plan, Check(question=f"Say yes about {concept}", expected_answer="yes"),
-                       self.prerequisite if request else None)
+                       [p for p in prerequisites if p] if request else [])
 
     def question(self, concept, description):
         return Check(question=f"Say yes about {concept}", expected_answer="yes")
@@ -796,18 +798,18 @@ def test_tutor_runs_the_whole_loop_without_a_provider(tutor_env):
     first = act("goal", "I want to learn the mean value theorem")
     assert first.tutor == {"mode": "diagnosing", "awaiting_answer": True, "goal": "Mean value theorem"}
     # The check opens as a conversation, then asks open questions: no options read out.
-    assert [b.say_text for b in first.beats] == ["Mean value theorem, good pick.",
-                                                 "Have you worked with Mean value theorem before?"]
+    # One note per turn: a short lead-in, one question, then wait.
+    assert [b.say_text for b in first.beats] == ["Mean value theorem, good pick. Have you worked with Mean value theorem before?"]
     probe = act("answer", "yes, a little")
-    assert probe.beats[0].say_text == "Then let's check one thing."
-    assert probe.beats[-1].say_text == "The mean value theorem guarantees a point where the tangent is…"
+    assert [b.say_text for b in probe.beats] == [
+        "Then let's check one thing. The mean value theorem guarantees a point where the tangent is…"]
     plans = run_check(act, session, ["2x + 1"])
     lesson = plans[-1]
     # Taught silently along the cheapest route: no route, cost or map in what the learner hears.
     spoken = " ".join(b.say_text for b in lesson.beats)
     assert lesson.concept_id == curriculum.ids["slope"] and "route" not in spoken.lower()
     assert "You know Functions, so let's start there." in spoken  # bridged from what they know
-    assert lesson.beats[-1].say_text == "Ready for the next piece?"  # the learner sets the pace
+    assert lesson.beats[-1].say_text.endswith(" Ready for the next piece?")  # the learner sets the pace
     # Lessons end without a quick check: Continue moves along the route.
     assert lesson.tutor["mode"] == "checking" and not lesson.tutor["awaiting_answer"]
     assert not any("check" in b.say_text.casefold() for b in lesson.beats)
@@ -830,7 +832,8 @@ def test_correct_goal_answer_skips_teaching_and_confusion_is_free(tutor_env):
     act("goal", "derivatives")
     act("answer", "yes")
     done = act("answer", "2x")
-    assert done.tutor["mode"] == "done" and [b.say_text for b in done.beats][:2] == ["Yes, 2x.", "You've got Derivatives."]
+    assert done.tutor["mode"] == "done"
+    assert [b.say_text for b in done.beats] == ["Yes, 2x. You've got Derivatives. What would you like to learn next?"]
     tutor, session, act = make()
     act("goal", "mean value theorem")
     run_check(act, session, ["derivative of x²"])  # knows derivatives: go straight to the theorem
@@ -865,12 +868,43 @@ def test_tutor_detours_to_a_prerequisite_and_creates_missing_concepts(tutor_env)
     assert proposals and chain.id not in graph.human(human.human_id).snapshot().nodes  # no check, no score
 
 
+class BreakdownAuthor(FakeAuthor):
+    def concept(self, request, existing):
+        return ConceptSpec(name=request, description=f"A smaller idea: {request}.",
+                           links=[ConceptLink(concept="Derivatives", similarity=8)])
+
+
+def test_confusion_breaks_a_topic_into_smaller_topics_then_returns_in_new_words(tutor_env):
+    graph, curriculum, human, make = tutor_env
+    author = BreakdownAuthor(prerequisite=["Rates of change", "Nested functions", "Slope and secant lines"])
+    tutor, session, act = make(author)
+    derivatives = curriculum.ids["derivatives"]
+    act("goal", "derivatives")
+    run_check(act, session, [])
+    while session.current != derivatives:
+        act("continue")
+    heard = list(session.said_steps[derivatives])
+    act("confused", "I don't get any of this")
+    # Each missing idea is its own small lesson, most basic first; created only when its turn comes.
+    rates = graph.god.get_concept("Rates of change").id
+    assert session.current == rates and session.detours == [derivatives]
+    assert [name for name, _ in session.subtopics] == ["Nested functions", "Slope and secant lines"]
+    nested = act("continue")
+    assert session.current == graph.god.get_concept("Nested functions").id
+    assert "Now, Nested functions." in " ".join(b.say_text for b in nested.beats)
+    # Slope was already covered on the route, so it is skipped; then back to derivatives, rephrased.
+    resumed = act("continue")
+    assert session.current == derivatives and not session.detours and not session.subtopics
+    assert "Back to Derivatives." in " ".join(b.say_text for b in resumed.beats)
+    assert author.avoid == heard and author.after == ["Rates of change", "Nested functions"]
+
+
 def test_tutor_can_build_a_new_goal_concept(tutor_env):
     graph, curriculum, human, make = tutor_env
     tutor, session, act = make(FakeAuthor())
     first = act("goal", "teach me the chain rule")
     assert first.tutor["goal"] == "Chain rule"
-    assert act("answer", "yes").beats[-1].say_text == "Say yes about Chain rule"
+    assert act("answer", "yes").beats[-1].say_text.endswith("Say yes about Chain rule")
     tutor, session, act = make()
     with pytest.raises(GoalError):
         act("goal", "quantum tunnelling")  # without an author nothing new can be built
@@ -884,8 +918,8 @@ def test_free_questions_keep_the_pending_check(tutor_env):
     pending = session.question
     assert pending.kind == "diagnostic"
     answer = act("question", "what is a dot product?")
-    assert session.question is pending and answer.beats[-1].say_text == f"Here it is again. {pending.spoken}"
-    assert act("continue").beats[-1].say_text == pending.spoken
+    assert session.question is pending and answer.beats[-1].say_text.endswith(f"Here it is again. {pending.spoken}")
+    assert act("continue").beats[-1].say_text.endswith(pending.spoken)
 
 
 def test_known_goal_and_requests_for_more_keep_teaching_without_regrading(tutor_env):
@@ -913,7 +947,7 @@ def test_questions_are_open_first_with_options_only_as_a_hint(tutor_env):
     # An answer that matches no choice isn't graded: the options are offered instead.
     offered = act("answer", "something about light")
     assert session.question is q and q.offered == q.choices
-    assert offered.beats[0].say_text == "Here are some options." and offered.beats[-1].say_text.endswith("?")
+    assert offered.beats[0].say_text.startswith("Here are some options. ") and offered.beats[-1].say_text.endswith("?")
     assert sum(n.content.text[:3] in ("A. ", "B. ", "C. ", "D. ") for n in offered.nodes if n.id.startswith("q")) == 4
     # Shuffled when asked: the answer isn't always listed first.
     assert len({tutor._question(c, "check").correct for c in curriculum.ids.values()}) > 1
@@ -929,10 +963,10 @@ def test_hint_ladder_narrows_before_revealing_and_never_retries_after_a_reveal(t
     wrong = next(c for c in q.choices if c != q.answer)
     retry = act("answer", wrong)  # First miss: two options, and the answer isn't given away.
     assert session.question is q and len(q.offered) == 2 and wrong not in q.offered and q.answer in q.offered
-    assert [b.say_text for b in retry.beats[:-1]] == ["Not quite.", "It's one of these two."]
+    assert retry.beats[0].say_text.startswith("Not quite. It's one of these two. ") and q.answer not in retry.beats[0].say_text.split("?")[0][:40]
     other = next(c for c in q.offered if c != q.answer)
     missed = act("answer", other)  # Second miss: the answer, then moving on (no "try again").
-    assert missed.beats[0].say_text == f"Not quite. It's {q.answer}." and session.question is None
+    assert missed.beats[0].say_text.startswith(f"Not quite. It's {q.answer}. ") and session.question is None
     assert not any("try" in b.say_text.casefold() for b in missed.beats[:2])
     session.question = q = tutor._question(dot, "check")
     act("hint")
@@ -947,12 +981,12 @@ def test_new_learners_skip_the_goal_question_and_yes_moves_on(tutor_env):
     target = curriculum.ids["mean_value_theorem"]
     act("goal", "mean value theorem")
     probe = act("answer", "no, never")
-    assert probe.beats[0].say_text == "No problem, we'll start simple."
+    assert probe.beats[0].say_text.startswith("No problem, we'll start simple. ")
     assert session.question.concept != target  # no point quizzing them on the goal itself
     assert graph.human(human.human_id).snapshot().nodes[target].understanding == 1.0
     run_check(act, session, [])
     current = session.current
-    assert session.question is None and act("hint").beats[0].say_text == "There's no question waiting right now."
+    assert session.question is None and act("hint").beats[0].say_text.startswith("There's no question waiting right now.")
     act("answer", "yes, ready")  # "Ready for the next piece?" "Yes."
     assert session.current != current and session.question is None
 
@@ -993,9 +1027,9 @@ class FactAuthor(FakeAuthor):
         return ConceptSpec(name="Even functions", description="On a symmetric domain, f(-x) = f(x).",
                            links=[ConceptLink(concept="Functions", similarity=8)])
 
-    def explain(self, concept, description, context, request=None, screen=None, memory=None):
+    def explain(self, concept, description, context, request=None, screen=None, memory=None, **kwargs):
         self.context = context
-        written = super().explain(concept, description, context, request, screen=screen, memory=memory)
+        written = super().explain(concept, description, context, request, screen=screen, memory=memory, **kwargs)
         written.facts = [
             ConceptSpec(name="Symmetry", description="A transformation preserves a figure or function.", links=[]),
             ConceptSpec(name="Even functions", description="On a symmetric domain, f(-x) = f(x).",
@@ -1117,24 +1151,104 @@ def test_diagram_compiler_rejects_what_it_cannot_draw_faithfully(change, message
         compile_lesson(DiagramLesson(title="x", beats=[DBeat(say="hi", focus=[])], diagram=diagram(**change)))
 
 
-def test_claude_author_compiles_retries_and_grades():
+def split_lesson(lesson, check=None, prerequisites=()):
+    """An authored lesson as the two calls now produce it: the writer's script and the illustrator's scene."""
+    script = {"title": lesson.title, "steps": [{"say": b.say, "show": f"show step {i + 1}"} for i, b in enumerate(lesson.beats)],
+              "check": check, "prerequisites": list(prerequisites), "facts": []}
+    visuals = {"diagram": lesson.diagram.model_dump(),
+               "steps": [{"focus": b.focus, "animate": [m.model_dump() for m in b.animate]} for b in lesson.beats]}
+    return script, visuals
+
+
+def test_lesson_writer_and_illustrator_are_separate_calls():
     from backend.app.author import ClaudeAuthor
-    good = {"lesson": AUTHORED["slope"].model_dump(), "check": {"question": "Slope from (0,0) to (2,4)?",
-            "expected_answer": "2"}, "prerequisite": None}
+    script, good = split_lesson(AUTHORED["slope"], {"question": "Slope from (0,0) to (2,4)?", "expected_answer": "2"},
+                                ["Ratios", "Coordinates"])
     bad = json.loads(json.dumps(good))
-    bad["lesson"]["diagram"]["curves"][0]["y"] = "w*t"
-    client, seen = claude_client(("tool", "submit_explanation", bad), ("tool", "submit_explanation", good),
-                                 {"verdict": "partly", "feedback": "Close: it is 2."})
+    bad["diagram"]["curves"][0]["y"] = "w*t"
+    client, seen = claude_client(("tool", "submit_lesson_plan", script), ("tool", "submit_visuals", bad),
+                                 ("tool", "submit_visuals", good), {"verdict": "partly", "feedback": "Close: it is 2."})
     author = ClaudeAuthor(client)
     written = author.explain("Slope", "rise over run", {"goal": "Derivatives"}, request="why rise over run?")
     assert written.plan.generated and written.check.expected_answer == "2"
-    # The large diagram schema travels as a non-strict tool, never as a compiled output grammar.
-    assert "format" not in seen[0]["output_config"] and seen[0]["tools"][0]["name"] == "submit_explanation"
-    assert "strict" not in seen[0]["tools"][0]
-    retry = seen[1]["messages"][2]["content"][0]
+    assert written.prerequisites == ["Ratios", "Coordinates"]
+    # Call 1 plans what is said and draws nothing; call 2 only draws, from that script.
+    writer, illustrator = seen[0], seen[1]
+    assert [t["name"] for t in writer["tools"]] == ["submit_lesson_plan"] and "Diagram language" not in writer["system"][0]["text"]
+    assert [t["name"] for t in illustrator["tools"]] == ["submit_visuals"] and "Diagram language" in illustrator["system"][0]["text"]
+    assert all(step["say"] in illustrator["messages"][0]["content"] for step in script["steps"])
+    assert "format" not in writer["output_config"] and "strict" not in illustrator["tools"][0]
+    # The illustrator cannot change the words: every spoken step is the writer's.
+    assert [b.say_text for b in written.plan.beats] == [step["say"] for step in script["steps"]]
+    retry = seen[2]["messages"][2]["content"][0]
     assert retry["type"] == "tool_result" and retry["is_error"] and "undefined parameter" in retry["content"]
     assert author.grade("Slope?", "2", "about two") == ("partly", "Close: it is 2.")
     assert '"w*t"' not in json.dumps(written.plan.model_dump())
+
+
+def test_illustrator_must_animate_and_a_failed_picture_keeps_the_lesson():
+    from backend.app.author import ClaudeAuthor
+    script, good = split_lesson(AUTHORED["slope"])
+    still = json.loads(json.dumps(good))
+    for step in still["steps"]:
+        step["animate"] = []
+    client, seen = claude_client(("tool", "submit_lesson_plan", script), ("tool", "submit_visuals", still),
+                                 ("tool", "submit_visuals", still))
+    written = ClaudeAuthor(client).explain("Slope", "rise over run", {})
+    assert "Nothing moves" in seen[2]["messages"][2]["content"][0]["content"]
+    # Both attempts were static: the writer's words are still taught, over a title card.
+    assert [b.say_text for b in written.plan.beats] == [step["say"] for step in script["steps"]]
+    assert written.prerequisites == []  # only a learner's confusion asks for smaller topics
+
+
+def test_illustrator_slips_are_repaired_not_rejected():
+    from backend.app.author import ClaudeAuthor
+    script, visuals = split_lesson(AUTHORED["slope"])
+    slipped = json.loads(json.dumps(visuals))
+    slipped["diagram"]["labels"].append({"id": "title", "text": "Slope", "x": 0, "y": 4.5})  # a compiler-owned id
+    slipped["diagram"]["points"].append({"id": "car", "x": 1, "y": 2, "z": "1.5", "text": None})  # numbers, and depth
+    moving = next(step for step in slipped["steps"] if step["animate"])
+    moving["animate"].append({**moving["animate"][0], "to": moving["animate"][0]["to"] - 0.1})  # same slider twice
+    client, seen = claude_client(("tool", "submit_lesson_plan", script), ("tool", "submit_visuals", slipped))
+    written = ClaudeAuthor(client).explain("Slope", "rise over run", {})
+    assert len(seen) == 2  # accepted first time: no round trip spent on slips with one meaning
+    assert {n.id for n in written.plan.nodes} >= {"title_1", "car"}
+    assert any(n.coordinate_system == "lesson_xyz" for n in written.plan.nodes)  # depth made it 3D
+
+
+def test_a_breakdown_is_not_drawn_until_it_is_needed():
+    from backend.app.author import ClaudeAuthor
+    script, _ = split_lesson(AUTHORED["slope"], prerequisites=["Ratios"])
+    client, seen = claude_client(("tool", "submit_lesson_plan", script))
+    written = ClaudeAuthor(client).explain("Slope", "", {}, request="what?", draw_breakdowns=False)
+    assert len(seen) == 1 and written.plan is None and written.prerequisites == ["Ratios"] and written.script
+
+
+class IllustratingAuthor(FakeAuthor):
+    def __init__(self, fail=False):
+        super().__init__()
+        self.drawn, self.fail = [], fail
+
+    def visualize(self, concept, script, screen=None, reference=None):
+        self.drawn.append((concept, [step.say for step in script.steps]))
+        plan = compile_lesson(reference) if self.fail else compile_lesson(reference, recipe_id="generated_v1", generated=True)
+        return plan
+
+
+def test_built_in_lessons_are_redrawn_in_3d_once_keeping_their_words(tutor_env):
+    graph, curriculum, human, make = tutor_env
+    author = IllustratingAuthor()
+    tutor, session, act = make(author)
+    derivatives = curriculum.ids["derivatives"]
+    plan, _ = tutor._lesson(derivatives, human.human_id, session)
+    assert plan.generated and author.drawn == [("Derivatives", [b.say for b in AUTHORED["derivatives"].beats])]
+    again, _ = tutor._lesson(derivatives, human.human_id, session)
+    assert len(author.drawn) == 1 and again is not plan  # cached, and a fresh copy each time
+    failing = IllustratingAuthor(fail=True)
+    tutor, session, act = make(failing)
+    flat, _ = tutor._lesson(derivatives, human.human_id, session)
+    tutor._lesson(derivatives, human.human_id, session)
+    assert not flat.generated and len(failing.drawn) == 2  # the flat version, and not cached: tried again
 
 
 def test_tutor_over_websocket_and_http(tmp_path):
@@ -1177,7 +1291,7 @@ def test_claude_timeouts_fit_measured_latency():
         body = json.loads(request.content)
         kind = "explain" if body.get("tools") else "quick"
         timeouts[kind] = request.extensions["timeout"]["read"]
-        content = ([{"type": "tool_use", "id": "t", "name": "submit_explanation", "input": {}}] if kind == "explain"
+        content = ([{"type": "tool_use", "id": "t", "name": body["tools"][0]["name"], "input": {}}] if kind == "explain"
                    else [{"type": "text", "text": json.dumps({"verdict": "correct", "feedback": "Yes."})}])
         return httpx2.Response(200, json={"id": "m", "type": "message", "role": "assistant", "model": "claude-sonnet-5-5",
                                           "content": content, "stop_reason": "end_turn", "stop_sequence": None,
@@ -1255,7 +1369,7 @@ def test_explanation_request_carries_screen_and_notes_and_applies_memory_edits(t
     human = graph.create_human().human_id
     store = LearnerMemory(graph)
     store.write(human, "/memories/learner.md", "- prefers real objects")
-    lesson = {"lesson": AUTHORED["slope"].model_dump(), "check": None, "prerequisite": None}
+    lesson, visuals = split_lesson(AUTHORED["slope"])
     replies, seen = [
         # Round 1: only a memory edit (allowed), which must be applied and answered.
         tool_reply({"type": "tool_use", "id": "m1", "name": "memory", "input": {
@@ -1263,7 +1377,8 @@ def test_explanation_request_carries_screen_and_notes_and_applies_memory_edits(t
             "new_str": "- prefers real objects\n- secant/tangent confusion resolved by sliding p"}}),
         # Round 2: a bad memory command next to the lesson; the lesson still lands.
         tool_reply({"type": "tool_use", "id": "m2", "name": "memory", "input": {"command": "create", "path": "/tmp/x", "file_text": "x"}},
-                   {"type": "tool_use", "id": "s1", "name": "submit_explanation", "input": lesson}),
+                   {"type": "tool_use", "id": "s1", "name": "submit_lesson_plan", "input": lesson}),
+        tool_reply({"type": "tool_use", "id": "v1", "name": "submit_visuals", "input": visuals}),
     ], []
 
     def handler(request):
@@ -1281,7 +1396,9 @@ def test_explanation_request_carries_screen_and_notes_and_applies_memory_edits(t
     user_text = first["messages"][0]["content"]
     assert "## What the learner is looking at right now" in user_text and "learner moved it to -2.5" in user_text
     assert "## Your notes on this learner (/memories)" in user_text and "prefers real objects" in user_text
-    assert [t.get("type", t.get("name")) for t in first["tools"]] == ["submit_explanation", "memory_20250818"]
+    assert [t.get("type", t.get("name")) for t in first["tools"]] == ["submit_lesson_plan", "memory_20250818"]
+    # The illustrator gets the screen too, but never the learner's notes.
+    assert [t["name"] for t in seen[2]["tools"]] == ["submit_visuals"] and "learner moved it to -2.5" in seen[2]["messages"][0]["content"]
     assert first["system"][0]["cache_control"] == {"type": "ephemeral"} and "LEARNER NOTES" in first["system"][0]["text"]
     answered = seen[1]["messages"][2]["content"]
     assert answered == [{"type": "tool_result", "tool_use_id": "m1", "content": "Edited /memories/learner.md"}]
@@ -1325,14 +1442,14 @@ def test_every_tool_call_in_an_explanation_reply_is_answered():
     import anthropic
     import httpx2
     from backend.app.author import ClaudeAuthor
-    bad = AUTHORED["slope"].model_dump()
-    bad["diagram"]["curves"][0]["y"] = "w*t"
-    good = {"lesson": AUTHORED["slope"].model_dump(), "check": None, "prerequisite": None}
+    good, visuals = split_lesson(AUTHORED["slope"])
+    bad = {**good, "steps": good["steps"][:1]}  # one step: too few
     replies, seen = [
-        tool_reply({"type": "tool_use", "id": "s1", "name": "submit_explanation", "input": {"lesson": bad, "check": None, "prerequisite": None}},
-                   {"type": "tool_use", "id": "s2", "name": "submit_explanation", "input": good},
+        tool_reply({"type": "tool_use", "id": "s1", "name": "submit_lesson_plan", "input": bad},
+                   {"type": "tool_use", "id": "s2", "name": "submit_lesson_plan", "input": good},
                    {"type": "tool_use", "id": "x1", "name": "draw", "input": {}}),
-        tool_reply({"type": "tool_use", "id": "s3", "name": "submit_explanation", "input": good}),
+        tool_reply({"type": "tool_use", "id": "s3", "name": "submit_lesson_plan", "input": good}),
+        tool_reply({"type": "tool_use", "id": "v1", "name": "submit_visuals", "input": visuals}),
     ], []
 
     def handler(request):

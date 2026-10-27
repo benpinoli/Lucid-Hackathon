@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from memory_graph import AmbiguousConcept, NotFound
 
-from .author import UNSURE, Check, grade_locally
+from .author import UNSURE, Check, LessonScript, ScriptStep, grade_locally
 from .conversation import PHRASES, Phrasing, echo, glue, joined, options_redundant
 from .diagrams import AUTHORED, compile_lesson
 from .goals import KNOWN, GoalError, Topic, _wrap, concept_card
@@ -40,8 +40,10 @@ ACTIONS = ("goal", "answer", "confused", "question", "continue", "explore", "rev
            "skip", "hint")
 REVISIT = re.compile(r"\b(review|revisit|go deeper|learn more|tell me more|teach me more|more detail|again)\b", re.I)
 # A short "yes" to "Ready for the next piece?" moves on; it is never a topic to look up.
-READY = re.compile(r"^\W*(yes|yeah|yep|sure|ok(ay)?|ready|go on|go ahead|next|keep going|let'?s go|continue)\b"
-                   r"[\w\s,'!.]{0,24}$", re.I)
+READY = re.compile(r"^\W*(yes|yeah|yep|yup|sure|ok(ay)?|ready|go on|go ahead|next|keep going|let'?s go|continue"
+                   r"|makes sense|got it|i see|i get it|right|mhm|uh huh)\b[\w\s,'!.]{0,24}$", re.I)
+# ...and a "no" to "Make sense so far?" asks for help with that step.
+NOT_CLEAR = re.compile(r"^\W*(no|nope|not really|not yet|not quite|huh|i'?m confused|i don'?t (?:get|understand))\b", re.I)
 # Replies to "Have you worked with X before?"; anything else counts as neutral.
 NEW_TO_IT = re.compile(r"\b(no|nope|never|not really|new to|haven'?t)\b", re.I)
 FAMILIAR = re.compile(r"\b(yes|yeah|yep|some|a (?:bit|little)|familiar|i have|i know|seen it|used it|kind of|sort of)\b", re.I)
@@ -106,7 +108,10 @@ class Session:
     current: str | None = None
     viewed: str | None = None  # Latest explained topic, including a side question or exploration.
     previous: str | None = None  # Last concept passed; its edge to the next one gets rated.
-    detours: list = field(default_factory=list)
+    detours: list = field(default_factory=list)  # Topics waiting for their smaller topics to finish.
+    subtopics: deque = field(default_factory=deque)  # (name, parent concept): smaller topics still to teach.
+    detour_topics: dict = field(default_factory=dict)  # parent -> names of smaller topics taught for it.
+    said_steps: dict = field(default_factory=dict)  # concept -> sentences already spoken about it.
     attempts: dict = field(default_factory=dict)
     covered: set = field(default_factory=set)
     recent: deque = field(default_factory=lambda: deque(maxlen=6))
@@ -123,7 +128,8 @@ class Session:
     shown_beats: list = field(default_factory=list)
     exchanges: deque = field(default_factory=lambda: deque(maxlen=6))
     said: dict = field(default_factory=dict)  # Last phrase variant per situation, so none repeats.
-    bridged: bool = False  # The first lesson after the check opens from what the learner knows.
+    bridged: bool = False
+    step_check: bool = False  # The step just shown has asked "Make sense so far?"; its question comes next.  # The first lesson after the check opens from what the learner knows.
     validate_write: Callable[[], None] | None = None  # Service epoch guard, outside provider calls.
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -145,6 +151,9 @@ class Tutor:
         self.memory = LearnerMemory(graph)
         self.reviews = Reviews(graph)
         self.active_learning = active_learning
+        self.scenes = {}  # Built-in lessons rebuilt in 3D by the illustrator, once per topic.
+        self.scenes_lock = threading.Lock()
+        self.scenes_pending = {}  # topic key -> Event set when its drawing finishes
         # LUCID_TUTOR_VARIETY=0 fixes the wording (first variant, seeded shuffles) for tests and demos.
         variety = os.getenv("LUCID_TUTOR_VARIETY", "1") != "0"
         self.phrasing = phrasing or Phrasing(variety=variety, seed=None if variety else 0)
@@ -173,6 +182,8 @@ class Tutor:
             plan = self._hint(session, user)
         elif action in ("answer", "question") and not session.question and READY.match(text):
             plan = self._continue(session, user)
+        elif action in ("answer", "question") and session.step_check and NOT_CLEAR.match(text):
+            plan = self._confused(session, user, text)
         elif action in ("review", "deeper") or (action in ("answer", "question", "continue") and REVISIT.search(text)):
             plan = self._revisit(session, user, text, action == "review")
         elif action == "goal":
@@ -217,6 +228,7 @@ class Tutor:
                             + ", ".join(t.name for t in self.curriculum.topics if t.level >= 2) + ".")
         s.target, s.queue, s.asked, s.question = target, deque([target]), set(), None
         s.current, s.previous, s.detours, s.attempts, s.covered = None, None, [], {}, set()
+        s.subtopics, s.detour_topics, s.said_steps = deque(), {}, {}
         s.viewed = None
         s.active_plan, s.remaining_beats, s.taught_beats = None, [], []
         s.warmup_active, s.warmup_queue, s.resume_question = False, deque(), None
@@ -317,10 +329,7 @@ class Tutor:
                 return self._consolidate(s, user, q.concept, [reaction])
             s.covered.add(q.concept)
             s.previous = q.concept
-            if s.detours:
-                resume = s.detours.pop()
-                return self._teach(s, user, resume, [reaction, self._say(s, "resume", topic=self._name(resume))])
-            return self._teach_next(s, user, [reaction])
+            return self._after_lesson(s, user, [reaction])
         s.attempts[q.concept] = s.attempts.get(q.concept, 0) + 1
         if s.attempts[q.concept] > MAX_CLARIFY:
             s.covered.add(q.concept)
@@ -418,6 +427,9 @@ class Tutor:
         if step is None:
             s.mode = "done"
             return self._finish(s, user, intro + [self._say(s, "route_done", topic=self._name(s.target))])
+        upcoming = [st["id"] for st in route["steps"] if not st["known"] and st["id"] not in s.covered and st["id"] != step]
+        if upcoming:
+            self._prefetch(upcoming[0])
         return self._teach(s, user, step, intro + [self._transition(s, route, step)])
 
     def _transition(self, s, route, step):
@@ -432,20 +444,60 @@ class Tutor:
             return self._say(s, "bridge_known", known=before["name"])
         return self._say(s, "bridge_new", topic=name)
 
-    def _teach(self, s, user, concept, intro):
+    def _teach(self, s, user, concept, intro, returning_after=None):
+        """returning_after: smaller topics just learned. The topic is then explained again in new
+        words, never with the sentences the learner already heard."""
         s.current, s.mode = concept, "checking"
         s.recent.append(self._name(concept))
-        plan, _ = self._lesson(concept, user, s)
+        plan = None
+        if returning_after is not None and self.author and s.said_steps.get(concept):
+            written = self.author.explain(self._name(concept), self._description(concept), self._context(user, s, concept),
+                                          screen=self._screen(s), memory=self.memory.for_learner(user),
+                                          avoid=list(s.said_steps[concept]), after=returning_after)
+            if written:
+                self._remember(user, concept, written)
+                plan = written.plan
+        if plan is None:
+            plan, _ = self._lesson(concept, user, s)
         plan.concept_id = concept
         return self._activate(s, plan, intro)
 
+    def _after_lesson(self, s, user, intro):
+        """A finished lesson leads to the next smaller topic, back to the topic that needed them,
+        or on along the route."""
+        if s.detours:
+            parent = s.detours[-1]
+            smaller = self._next_subtopic(s, user, parent)
+            if smaller:
+                s.detour_topics.setdefault(parent, []).append(self._name(smaller))
+                return self._teach(s, user, smaller, intro + [self._say(s, "next", topic=self._name(smaller))])
+            s.detours.pop()
+            return self._teach(s, user, parent, intro + [self._say(s, "resume", topic=self._name(parent))],
+                               returning_after=s.detour_topics.pop(parent, []))
+        return self._teach_next(s, user, intro)
+
+    def _next_subtopic(self, s, user, parent):
+        """Smaller topics are created in the shared graph only when their turn comes; known ones are skipped."""
+        members = self.graph.human(user).snapshot().nodes
+        while s.subtopics and s.subtopics[0][1] == parent:
+            name, _ = s.subtopics.popleft()
+            try:
+                concept = self._find(name, create=True, link_to=parent)
+            except GoalError:
+                continue
+            if (concept and concept != parent and concept not in s.covered and concept not in s.detours
+                    and (concept not in members or members[concept].understanding < KNOWN)):
+                return concept
+        return None
+
     def _activate(self, s, plan, intro):
         """Start a lesson. It ends without a check question: Continue moves on to the next concept."""
-        s.question = None
+        s.question, s.step_check = None, False
         if self.active_learning and len(plan.beats) > 1:
             s.active_plan = plan.model_copy(deep=True)
             s.remaining_beats, s.taught_beats = list(plan.beats), []
             return self._small_step(s, intro)
+        s.said_steps.setdefault(s.current, []).extend(beat.say_text for beat in plan.beats)
         return self._compose(intro, plan, None, ready=self._say(s, "ready"))
 
     def _shown_plan(self, s):
@@ -468,6 +520,7 @@ class Tutor:
         """Reveal one short beat, then wait for an actual learner response."""
         beat = s.remaining_beats.pop(0)
         s.taught_beats.append(beat.say_text)
+        s.said_steps.setdefault(s.current, []).append(beat.say_text)
         if not s.remaining_beats:
             plan = s.active_plan.model_copy(deep=True)
             plan.beats = [beat]
@@ -475,23 +528,23 @@ class Tutor:
             return self._compose(intro, plan, None, ready=self._say(s, "ready"))  # The learner sets the pace.
         plan = self._shown_plan(s)
         plan.beats = [beat]
+        # One thing per turn: the step, a check-in, then wait. Its question (if any) is the next
+        # turn, once the learner has looked and answered the check-in.
+        s.question, s.step_check = None, True
+        return self._compose(intro, plan, None, ready=self._say(s, "check_in"))
+
+    def _step_question(self, s):
+        """The prediction for the step just taught: Claude's, or the authored one after step 1."""
         check = self.author.practice("prediction", self._name(s.current), self._description(s.current),
                                      covered=list(s.taught_beats)) if self.interactive else None
         if check:
-            s.question = Question(s.current, "prediction", check.question, check.expected_answer)
-            return self._compose(intro, plan, s.question)
+            return Question(s.current, "prediction", check.question, check.expected_answer)
         topic = self.curriculum.by_id.get(s.current)
-        if topic and topic.key in PREDICTIONS:
+        if topic and topic.key in PREDICTIONS and len(s.taught_beats) == 1:
             prompt, correct, wrong = PREDICTIONS[topic.key]
-            # One authored prediction per concept; later steps pause for self-explanation.
-            if len(s.taught_beats) == 1:
-                choices = tuple(self.phrasing.shuffle((correct, wrong)))
-                s.question = Question(s.current, "prediction_choice", prompt, correct, choices, choices.index(correct))
-                return self._compose(intro, plan, s.question)
-        # Never turn a provider outage into a fake grade or a long autoplay lesson.
-        s.question = None
-        plan.beats.append(TeachingBeat(beat_id="pause", say_text=self._say(s, "pause"), focus_ids=[]))
-        return self._compose(intro, plan, None)
+            choices = tuple(self.phrasing.shuffle((correct, wrong)))
+            return Question(s.current, "prediction_choice", prompt, correct, choices, choices.index(correct))
+        return None  # Never turn a provider outage into a fake grade: just go on to the next step.
 
     def _consolidate(self, s, user, concept, intro):
         members = self.graph.human(user).snapshot()
@@ -575,9 +628,7 @@ class Tutor:
             return self._card(s, "A useful gap to work on", [feedback, self._say(s, "gap")])
         s.covered.add(q.concept)
         s.previous = q.concept
-        if s.detours:
-            return self._teach(s, user, s.detours.pop(), [feedback])
-        return self._teach_next(s, user, [feedback])
+        return self._after_lesson(s, user, [feedback])
 
     def _recall(self, s, user, text, warmup=False):
         if s.warmup_active:
@@ -628,7 +679,8 @@ class Tutor:
         # Skipping never scores anything or changes the review schedule.
         if s.warmup_active:
             return self._next_recall(s, user, [self._say(s, "skipped")])
-        if q and q.kind.startswith("prediction") and s.remaining_beats:
+        if (s.step_check or (q and q.kind.startswith("prediction"))) and s.remaining_beats:
+            s.step_check = False
             return self._small_step(s, [self._say(s, "skip_step")])
         if q:
             s.covered.add(q.concept)
@@ -648,7 +700,7 @@ class Tutor:
             # Canonical authored examples need no parameter-selection provider round trip.
             return authored_plan(topic.recipe), None
         if request is None and topic and topic.key in AUTHORED:
-            return compile_lesson(AUTHORED[topic.key]), None
+            return self._scene(topic), None
         if request is None:
             saved = self.library.get(user, concept)
             if saved:
@@ -672,19 +724,65 @@ class Tutor:
         return concept_card(topic or Topic(concept, self._name(concept), "", 2, self._description(concept)
                                            or "No explanation is available yet.", "", (), 0)), None
 
+    def _scene(self, topic):
+        """A built-in lesson: its checked words and numbers, drawn as an animated 3D scene.
+
+        The hand-made (flat) diagram is the reference and the fallback. Scenes are shared by all
+        learners, so each topic is illustrated once; a request already drawing it is waited for.
+        """
+        lesson = AUTHORED[topic.key]
+        if not (self.author and hasattr(self.author, "visualize")):
+            return compile_lesson(lesson)
+        with self.scenes_lock:
+            cached = self.scenes.get(topic.key)
+            pending = None if cached else self.scenes_pending.get(topic.key)
+            drawing = cached is None and pending is None
+            if drawing:
+                pending = self.scenes_pending[topic.key] = threading.Event()
+        if cached is None and not drawing:
+            pending.wait(timeout=90)
+            with self.scenes_lock:
+                cached = self.scenes.get(topic.key)
+        if cached is not None or not drawing:
+            return cached.model_copy(deep=True) if cached is not None else compile_lesson(lesson)
+        try:  # Drawn outside the lock: other learners' turns never wait on it.
+            script = LessonScript(title=lesson.title, check=None, steps=[
+                ScriptStep(say=beat.say, show=f"What this sentence describes; the flat version points at {beat.focus}.")
+                for beat in lesson.beats])
+            plan = self.author.visualize(topic.name, script, reference=lesson)
+            if plan.generated:  # The flat fallback is not cached: the next visit tries again.
+                with self.scenes_lock:
+                    self.scenes[topic.key] = plan
+            return plan.model_copy(deep=True)
+        finally:
+            with self.scenes_lock:
+                self.scenes_pending.pop(topic.key, None)
+            pending.set()
+
+    def _prefetch(self, concept):
+        """Start drawing an upcoming built-in lesson while the learner works on this one."""
+        topic = self.curriculum.by_id.get(concept)
+        if (topic and topic.key in AUTHORED and not topic.recipe and self.author and hasattr(self.author, "visualize")
+                and topic.key not in self.scenes and topic.key not in self.scenes_pending):
+            threading.Thread(target=self._scene, args=(topic,), daemon=True, name=f"scene-{topic.key}").start()
+
     def _clarify(self, s, user, concept, request, intro):
+        # Not drawn yet if it breaks the topic down: the smaller topics usually come first.
         written = self.author.explain(self._name(concept), self._description(concept), self._context(user, s),
-                                      request, screen=self._screen(s),
-                                      memory=self.memory.for_learner(user)) if self.author else None
-        if written and written.prerequisite:
-            prerequisite = self._find(written.prerequisite, create=True, link_to=concept)
-            members = self.graph.human(user).snapshot().nodes
-            if prerequisite and prerequisite != concept and (
-                    prerequisite not in members or members[prerequisite].understanding < KNOWN):
+                                      request, screen=self._screen(s), memory=self.memory.for_learner(user),
+                                      draw_breakdowns=False) if self.author else None
+        if written and written.prerequisites:
+            # Break it down: each missing idea is its own small lesson, most basic first, before
+            # (and ahead of any siblings still queued) returning to this one.
+            s.subtopics.extendleft((name, concept) for name in reversed(written.prerequisites))
+            first = self._next_subtopic(s, user, concept)
+            if first:
                 s.detours.append(concept)
-                return self._teach(s, user, prerequisite, intro + [
-                    self._say(s, "detour", topic=self._name(prerequisite))])
+                s.detour_topics[concept] = [self._name(first)]
+                return self._teach(s, user, first, intro + [self._say(s, "detour", topic=self._name(first))])
         s.current, s.mode = concept, "checking"
+        if written and written.plan is None:  # Nothing smaller left to learn: draw it after all.
+            written.plan = self.author.visualize(self._name(concept), written.script, self._screen(s))
         if written:
             self._remember(user, concept, written)
             plan = written.plan
@@ -720,7 +818,7 @@ class Tutor:
             plan.concept_id = concept
             if guided:
                 s.target, s.current, s.mode = concept, concept, "checking"
-                s.covered, s.previous, s.detours = set(), None, []
+                s.covered, s.previous, s.detours, s.subtopics = set(), None, [], deque()
                 return self._activate(s, plan, [])
             return self._remind(s, plan, [])
         return self._remind(s, self.goals.tag(text, self.planner(text)), [])
@@ -748,14 +846,17 @@ class Tutor:
     def _continue(self, s, user):
         if s.question:
             return self._reask(s, s.question, [self._say(s, "again")])
+        if s.step_check and s.active_plan:
+            s.step_check = False
+            question = self._step_question(s)
+            if question:
+                s.question = question
+                return self._reask(s, question, [])
         if s.remaining_beats and s.active_plan:
             return self._small_step(s, [])
         if s.mode == "checking" and s.current:
             s.covered.add(s.current)
-            if s.detours:  # A finished prerequisite returns to the lesson that needed it.
-                resume = s.detours.pop()
-                return self._teach(s, user, resume, [self._say(s, "resume", topic=self._name(resume))])
-            return self._teach_next(s, user, [])
+            return self._after_lesson(s, user, [])
         if s.mode == "done" and s.target:
             return self._revisit(s, user, "", review=False)
         return self._card(s, "What would you like to learn?", [self._say(s, "idle")])
@@ -764,22 +865,34 @@ class Tutor:
         topic = self.curriculum.by_id.get(s.target)
         plan = compile_lesson(AUTHORED[topic.key]) if topic and topic.key in AUTHORED else (
             self.planner(topic.recipe) if topic and topic.recipe else card(self._name(s.target), []))
-        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(glue(intro))] + [
-            TeachingBeat(beat_id="next", say_text=self._say(s, "what_next"), focus_ids=[])]
+        plan.beats = self._joined([], before=" ".join(glue(intro)), after=self._say(s, "what_next"), beat_id="next")
         return plan
 
     # ---- plans -----------------------------------------------------------------------------
     # Every turn: a short reaction and transition (at most two "glue" lines, which the voice may
     # rephrase), the lesson step, then one hand-off spoken last, then silence.
     def _compose(self, intro, plan: LessonPlan, question: Question | None, ready: str | None = None):
-        beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(glue(intro))]
-        beats += [beat.model_copy(update={"beat_id": f"l{i}"}) for i, beat in enumerate(plan.beats)]
+        beats = [beat.model_copy(update={"beat_id": f"l{i}"}) for i, beat in enumerate(plan.beats)]
         if question:
             beats.append(TeachingBeat(beat_id="check", say_text=question.spoken, focus_ids=[]))
         elif ready:
-            beats.append(TeachingBeat(beat_id="ready", say_text=ready, focus_ids=[]))
-        plan.beats = beats
+            beats = self._joined(beats, after=ready, beat_id="ready")
+        plan.beats = self._joined(beats, before=" ".join(glue(intro)))
         return plan
+
+    @staticmethod
+    def _joined(beats, before="", after="", beat_id="i0"):
+        """One note per turn: the lead-in and hand-off are part of the step, not notes of their own."""
+        if not (before or after):
+            return beats
+        if not beats:
+            return [TeachingBeat(beat_id=beat_id, say_text=" ".join(t for t in (before, after) if t), focus_ids=[])]
+        beats = list(beats)
+        if before:
+            beats[0] = beats[0].model_copy(update={"say_text": f"{before} {beats[0].say_text}"})
+        if after:
+            beats[-1] = beats[-1].model_copy(update={"say_text": f"{beats[-1].say_text} {after}"})
+        return beats
 
     def _ask_card(self, question: Question, intro):
         offered = question.offered or ()
@@ -790,21 +903,20 @@ class Tutor:
             if len(plan.nodes) < MAX_OBJECTS:
                 plan.nodes.append(Node(id=f"q{i}", content=Label(text=line, position=[0.0, round(y, 2)])))
                 y -= 0.9
-        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=text, focus_ids=[]) for i, text in enumerate(glue(intro))]
-        plan.beats.append(TeachingBeat(beat_id="question", say_text=question.spoken,
-                                       focus_ids=[n.id for n in plan.nodes if n.id.startswith("q")]))
+        plan.beats = self._joined([TeachingBeat(beat_id="question", say_text=question.spoken,
+                                                focus_ids=[n.id for n in plan.nodes if n.id.startswith("q")])],
+                                  before=" ".join(glue(intro)))
         return plan
 
     def _card(self, s, title, lines):
         plan = card(title, [])
-        plan.beats = [TeachingBeat(beat_id=f"i{i}", say_text=line, focus_ids=[]) for i, line in enumerate(glue(lines))]
+        plan.beats = self._joined([], before=" ".join(glue(lines)))
         return plan
 
     def _remind(self, s, plan, intro):
         plan = self._compose(intro, plan, None)
         if s.question:
-            plan.beats.append(TeachingBeat(beat_id="reminder", say_text=f"{self._say(s, 'again')} {s.question.spoken}",
-                                           focus_ids=[]))
+            plan.beats = self._joined(plan.beats, after=f"{self._say(s, 'again')} {s.question.spoken}")
         return plan
 
     # ---- questions, names and concepts -----------------------------------------------------

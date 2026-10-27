@@ -26,8 +26,12 @@ VIEW = 6.0  # Anything at the default slider values must sit within this box.
 RESERVED = {"e", "t"}  # e is Euler's number; t is the curve parameter.
 
 
+MAX_BEATS = 12  # Many small steps beat a few crowded ones.
+
+
 class _Spec(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # A number is a valid expression: x=2 means "2", so it is taken rather than rejected.
+    model_config = ConfigDict(extra="forbid", coerce_numbers_to_str=True)
 
 
 class DSlider(_Spec):
@@ -282,7 +286,7 @@ def compile_lesson(lesson: DiagramLesson, recipe_id="diagram_v1", generated=Fals
     _check(len(nodes) <= MAX_OBJECTS, f"Too many objects ({len(nodes)}); the limit is {MAX_OBJECTS}")
     if d.dimensions == 3:
         nodes = [node.model_copy(update={"coordinate_system": "lesson_xyz"}) for node in nodes]
-    _check(1 <= len(lesson.beats) <= 6, "Use 1 to 6 beats")
+    _check(1 <= len(lesson.beats) <= MAX_BEATS, f"Use 1 to {MAX_BEATS} beats")
     beats, state = [], dict(params)
     for i, beat in enumerate(lesson.beats, start=1):
         say = beat.say.strip()

@@ -155,6 +155,9 @@ test('learner can review and go deeper after mastering a goal', async ({ page })
   await expect(page.getByRole('slider', { name: 'Vector angle' })).toBeVisible();
   await page.getByRole('button', { name: 'Go deeper', exact: true }).click();
   await expect(page.locator('#beats')).toContainText("Let's go further with Dot product");
+  // One note per turn: the step checks in, and its question comes after the learner replies.
+  await expect(page.locator('#beats')).toContainText('Make sense so far?');
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await expect(page.locator('#beats')).toContainText('points along which axis');
   await expect(page.getByRole('button', { name: 'Ask a question', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
@@ -248,6 +251,9 @@ test('tutor: spoken-style check, silent route, interactive diagrams, confusion a
   await answerStartingCheck(page, text => text.includes('2x + 1') ? '7' : 'not sure');
   await expect(beats).toContainText("You know Functions, so let's start there.");
   await expect(beats).not.toContainText('route');
+  await expect(beats.locator('button.beat')).toHaveCount(1);  // one note per turn
+  await page.locator('#reply-text').fill('yes');  // "Make sense so far?" "Yes."
+  await page.locator('#reply-send').click();
   await expect(beats).toContainText('Two points have the same height');
   // Every explanation has a diagram; its sliders re-plot locally.
   await page.waitForLoadState('networkidle');
@@ -339,17 +345,17 @@ test('tutor actions carry what the learner sees: active step and moved sliders',
   // Earlier tests may already have taught this learner, so the check can be short or skipped.
   await expect(page.locator('#status')).toHaveText('Connected');
   await answerStartingCheck(page, text => text.includes('2x + 1') ? '7' : 'not sure');
-  await expect(beats.locator('button.beat').nth(1)).toBeVisible();
+  await expect(beats.locator('button.beat').first()).toBeVisible();
   const goal = sent.find(frame => frame.type === 'tutor' && frame.action === 'goal');
   expect(goal?.view).toEqual({ active_beat: null, sliders: {}, animating: null, in_vr: false });
-  await page.locator('#beats button.beat').nth(1).click();
+  await page.locator('#beats button.beat').first().click();
   // Slope ('first point') and Derivatives ('point x') both bind param.p.
   const slider = page.locator('#sliders input[type=range]').first();
   await slider.fill('-2.5'); await slider.dispatchEvent('input');
   await page.getByRole('button', { name: "I'm confused" }).click();
   await expect(page.locator('#status')).toHaveText('Connected');
   const confused = sent.filter(frame => frame.type === 'tutor' && frame.action === 'confused').at(-1);
-  expect(confused?.view?.active_beat).toBe(1);
+  expect(confused?.view?.active_beat).toBe(0);
   expect(confused?.view?.sliders['param.p']).toBe(-2.5);
   expect(confused?.view?.in_vr).toBe(false);
 });
