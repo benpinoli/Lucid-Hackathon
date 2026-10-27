@@ -17,6 +17,13 @@ from .learning import LessonError, LessonPlan, complex_quadratic_lesson, dijkstr
 
 log = logging.getLogger("lucid.planner")
 
+
+def describe_failure(exc) -> str:
+    """API errors carry the provider's reason (never learner text); others log only their type."""
+    if isinstance(exc, anthropic.APIStatusError):
+        return f"{type(exc).__name__} {exc.status_code}: {exc.message}"
+    return type(exc).__name__
+
 SYSTEM = """You choose the visual lesson for LUCID, a 3D math tutor. Given what a learner asked,
 pick one recipe and its parameters. The app computes every number, label and sentence from
 your parameters, so choose clean, small examples a learner can follow.
@@ -142,7 +149,7 @@ class ClaudePlanner:
                     messages=[{"role": "user", "content": text}], output_config={"effort": "low"},
                     betas=["server-side-fallback-2026-07-01"], fallbacks="default")
             except (anthropic.APIError, ValueError) as exc:
-                log.warning("Claude goal resolver failed: %s", type(exc).__name__)
+                log.warning("Claude goal resolver failed: %s", describe_failure(exc))
                 return None
             if response.stop_reason == "refusal" or response.parsed_output is None:
                 return None
@@ -170,5 +177,5 @@ class ClaudePlanner:
                 return lesson
         except (anthropic.APIError, ValueError) as exc:
             # Never log learner text: transcripts are personal data.
-            log.warning("Claude planner fell back to authored lessons: %s", type(exc).__name__)
+            log.warning("Claude planner fell back to authored lessons: %s", describe_failure(exc))
         return plan(text)

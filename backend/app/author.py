@@ -13,10 +13,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 import anthropic
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .diagrams import AUTHORED, DiagramError, DiagramLesson, compile_lesson
 from .learning import LessonPlan
+from .planner import describe_failure
 
 log = logging.getLogger("lucid.author")
 
@@ -149,6 +150,23 @@ class ClaudeAuthor:
             raise DiagramError(f"No usable output (stop_reason={response.stop_reason})")
         return response
 
+    def _tool(self, schema, name, system, messages, effort="low"):
+        """For schemas too large for structured outputs ("compiled grammar is too large").
+
+        A non-strict tool gives the model the full schema without grammar compilation; the
+        caller validates the input with pydantic and the diagram compiler, and retries once.
+        """
+        response = self.client.beta.messages.create(
+            model=self.model, max_tokens=16000, messages=messages,
+            system=f"{system}\n\nAnswer only by calling the {name} tool exactly once.",
+            tools=[{"name": name, "description": "Submit the explanation.", "input_schema": schema.model_json_schema()}],
+            tool_choice={"type": "auto"}, output_config={"effort": effort},
+            betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+        call = next((block for block in response.content if block.type == "tool_use" and block.name == name), None)
+        if response.stop_reason == "refusal" or call is None:
+            raise DiagramError(f"No usable output (stop_reason={response.stop_reason})")
+        return response, call
+
     def explain(self, concept, description, context, request=None) -> Written | None:
         """A diagram lesson for a concept, or a focused answer to the learner's words."""
         task = (f"The learner said: {request!r}\nWrite a short, deeper explanation that resolves exactly that, "
@@ -174,19 +192,21 @@ class ClaudeAuthor:
         messages = [{"role": "user", "content": user}]
         try:
             for attempt in range(2):
-                response = self._parse(Explanation, system, messages)
-                written = response.parsed_output
+                # The diagram schema exceeds the structured-output grammar limit, so a tool carries it.
+                response, call = self._tool(Explanation, "submit_explanation", system, messages)
                 try:
+                    written = Explanation.model_validate(call.input)
                     plan = compile_lesson(written.lesson, recipe_id="generated_v1", generated=True)
-                except DiagramError as exc:
+                except (ValidationError, DiagramError) as exc:
                     if attempt:
                         raise
                     messages += [{"role": "assistant", "content": response.content},
-                                 {"role": "user", "content": f"LUCID could not draw that diagram: {exc}. Fix it."}]
+                                 {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call.id, "is_error": True,
+                                  "content": f"LUCID could not use that: {str(exc)[:1500]}. Call the tool again with it fixed."}]}]
                     continue
                 return Written(plan, written.check, (written.prerequisite or "").strip() or None, written.facts)
         except (anthropic.APIError, ValueError) as exc:
-            log.warning("Claude explanation failed: %s", type(exc).__name__)
+            log.warning("Claude explanation failed: %s", describe_failure(exc))
         return None
 
     def question(self, concept, description) -> Check | None:
@@ -196,7 +216,7 @@ class ClaudeAuthor:
                                    [{"role": "user", "content": f"Concept: {concept}\n{description}"}])
             return response.parsed_output
         except (anthropic.APIError, ValueError) as exc:
-            log.warning("Claude question failed: %s", type(exc).__name__)
+            log.warning("Claude question failed: %s", describe_failure(exc))
             return None
 
     def practice(self, kind, concept, description, related=None, covered=None) -> Check | None:
@@ -215,7 +235,7 @@ class ClaudeAuthor:
                 "kind": kind, "concept": concept, "description": description,
                 "directly_related": related, "covered_so_far": covered})}]).parsed_output
         except (anthropic.APIError, ValueError) as exc:
-            log.warning("Practice generation failed: %s", type(exc).__name__)
+            log.warning("Practice generation failed: %s", describe_failure(exc))
             return None
 
     def assess_retrieval(self, question, rubric, answer) -> RetrievalGrade | None:
@@ -229,7 +249,7 @@ class ClaudeAuthor:
                 [{"role": "user", "content": json.dumps({"question": question, "rubric": rubric, "answer": answer})}]
                 ).parsed_output
         except (anthropic.APIError, ValueError) as exc:
-            log.warning("Retrieval grading failed: %s", type(exc).__name__)
+            log.warning("Retrieval grading failed: %s", describe_failure(exc))
             return None
 
     def grade(self, question, expected, answer, choices=None):
@@ -243,7 +263,7 @@ class ClaudeAuthor:
             grade = response.parsed_output
             return grade.verdict, grade.feedback.strip()[:200] or "Thanks."
         except (anthropic.APIError, ValueError) as exc:
-            log.warning("Claude grading failed: %s", type(exc).__name__)
+            log.warning("Claude grading failed: %s", describe_failure(exc))
             return None
 
     def concept(self, request, existing) -> ConceptSpec | None:
@@ -257,5 +277,5 @@ class ClaudeAuthor:
                                    f"Concept requested: {request}\nExisting concepts: {json.dumps(existing)}"}])
             return response.parsed_output
         except (anthropic.APIError, ValueError) as exc:
-            log.warning("Claude concept creation failed: %s", type(exc).__name__)
+            log.warning("Claude concept creation failed: %s", describe_failure(exc))
             return None

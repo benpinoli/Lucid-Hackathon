@@ -453,8 +453,11 @@ def claude_client(*replies):
             raise reply
         if isinstance(reply, int):
             return httpx2.Response(reply, json={"type": "error", "error": {"type": "api_error", "message": "x"}})
-        stop = reply.pop("stop_reason", "end_turn")
-        content = [] if stop == "refusal" else [{"type": "text", "text": json.dumps(reply)}]
+        if isinstance(reply, tuple):  # ("tool", name, input): a tool call instead of structured text
+            content, stop = [{"type": "tool_use", "id": f"toolu_{len(seen)}", "name": reply[1], "input": reply[2]}], "tool_use"
+        else:
+            stop = reply.pop("stop_reason", "end_turn")
+            content = [] if stop == "refusal" else [{"type": "text", "text": json.dumps(reply)}]
         return httpx2.Response(200, json={
             "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
             "content": content, "stop_reason": stop, "stop_sequence": None,
@@ -1047,11 +1050,16 @@ def test_claude_author_compiles_retries_and_grades():
             "expected_answer": "2"}, "prerequisite": None}
     bad = json.loads(json.dumps(good))
     bad["lesson"]["diagram"]["curves"][0]["y"] = "w*t"
-    client, seen = claude_client(bad, good, {"verdict": "partly", "feedback": "Close: it is 2."})
+    client, seen = claude_client(("tool", "submit_explanation", bad), ("tool", "submit_explanation", good),
+                                 {"verdict": "partly", "feedback": "Close: it is 2."})
     author = ClaudeAuthor(client)
     written = author.explain("Slope", "rise over run", {"goal": "Derivatives"}, request="why rise over run?")
     assert written.plan.generated and written.check.expected_answer == "2"
-    assert "undefined parameter" in seen[1]["messages"][2]["content"]
+    # The large diagram schema travels as a non-strict tool, never as a compiled output grammar.
+    assert "format" not in seen[0]["output_config"] and seen[0]["tools"][0]["name"] == "submit_explanation"
+    assert "strict" not in seen[0]["tools"][0]
+    retry = seen[1]["messages"][2]["content"][0]
+    assert retry["type"] == "tool_result" and retry["is_error"] and "undefined parameter" in retry["content"]
     assert author.grade("Slope?", "2", "about two") == ("partly", "Close: it is 2.")
     assert '"w*t"' not in json.dumps(written.plan.model_dump())
 
