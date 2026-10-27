@@ -3,7 +3,7 @@ import json
 
 from sqlalchemy import Column, MetaData, String, Table, Text, insert, select, update
 
-from .author import Check
+from .teaching import Check
 from .learning import LessonPlan
 
 

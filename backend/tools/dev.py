@@ -25,9 +25,7 @@ def main():
     print("\nLocal demo token (private; paste in frontend):\n" + token, flush=True)
     print("\nVoice: " + ("enabled (OPENAI_API_KEY set)" if os.getenv("OPENAI_API_KEY")
                          else "off; export OPENAI_API_KEY to enable the realtime voice tutor"), flush=True)
-    print("Lesson planner: " + ("Claude (ANTHROPIC_API_KEY set)" if os.getenv("ANTHROPIC_API_KEY")
-                                 else "authored examples; export ANTHROPIC_API_KEY to let Claude choose examples"),
-          flush=True)
+    print("Teacher: gpt-realtime-2.1 (voice, text, planning, diagrams and brain tools); OPENAI_API_KEY only", flush=True)
     print("3D models: " + ("downloading the catalog to backend/model_cache in the background"
                            if os.environ["LUCID_MODEL_PREFETCH"] == "1" else "downloaded on first use"), flush=True)
     print("\nFrontend: http://localhost:5173 | Backend docs: http://127.0.0.1:"

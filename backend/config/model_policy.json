@@ -1,22 +1,42 @@
 {
   "version": 1,
-  "provider": "claude_selects_recipe_parameters_when_ANTHROPIC_API_KEY_set_else_local_deterministic",
-  "planner_model": "claude-sonnet-5-5",
-  "planner_output": "typed_recipe_parameters_only_numbers_and_text_computed_by_recipes",
+  "provider": "openai_realtime_single_session_when_OPENAI_API_KEY_set_else_local_deterministic",
+  "planner_model": "gpt-realtime-2.1",
+  "planner_output": "validated_diagram_language_and_spoken_steps_via_local_tools",
   "allow_runtime_code": false,
   "allow_external_assets": "catalog_3d_models_only: backend/config/models.json ids, sha256-pinned, cached and served same-origin",
   "allow_automatic_assessments": false,
-  "diagnostic_scoring": {"method": "diagnostic_quiz", "correct": 7, "wrong": 2, "not_sure": 1, "confidence": 0.6},
+  "diagnostic_scoring": {
+    "method": "diagnostic_quiz",
+    "correct": 7,
+    "wrong": 2,
+    "not_sure": 1,
+    "confidence": 0.6
+  },
   "known_threshold": 7,
-  "tutor_scoring": {"voice_diagnostic": {"correct": 7, "partly": 4, "wrong": 2, "unsure": 1}, "voice_check": {"correct": 8, "partly": 5, "wrong": 3, "unsure": 2}, "only_graded_answers_change_scores": true},
-  "ai_concepts": "claude_created_concepts_written_to_shared_god_brain_via_accepted_proposals_with_provenance",
-  "ai_content": "claude_explanations_allowed_scene_marked_generated_geometry_computed_by_lucid",
+  "tutor_scoring": {
+    "voice_diagnostic": {
+      "correct": 7,
+      "partly": 4,
+      "wrong": 2,
+      "unsure": 1
+    },
+    "voice_check": {
+      "correct": 8,
+      "partly": 5,
+      "wrong": 3,
+      "unsure": 2
+    },
+    "only_graded_answers_change_scores": true
+  },
+  "ai_concepts": "realtime_created_concepts_written_to_shared_god_brain_via_accepted_proposals_with_openai_provenance",
+  "ai_content": "realtime_explanations_and_scene_code_marked_generated_geometry_computed_by_lucid",
   "initial_familiarity": "min_endpoint_understanding (method derived_min_understanding; not in baseline cost)",
   "graph_methodology": "delegate_to_memory_graph_database_configuration",
   "max_scene_event_bytes": 16384,
   "max_scene_objects": 30,
   "max_active_lessons": 128,
   "max_websocket_messages_per_second": 20,
-  "voice": "openai_realtime_webrtc_when_OPENAI_API_KEY_set_else_text_fallback",
+  "voice": "same_gpt_realtime_2_1_session_handles_voice_text_planning_and_brain_tools",
   "beat_animation": "slider_moves_resolved_and_view_checked_by_compiler_played_while_beat_is_spoken"
 }

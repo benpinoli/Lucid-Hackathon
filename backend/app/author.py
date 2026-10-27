@@ -1,4 +1,4 @@
-"""The tutor's writer: explanations with diagrams, check questions, grading, new concepts.
+"""Legacy provider adapter retained for offline regression tests; not loaded by the app.
 
 Claude writes in the diagram language (diagrams.py); LUCID validates and computes geometry.
 Every call degrades to None (or a local heuristic for grading) so the tutor keeps working

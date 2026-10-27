@@ -1,5 +1,8 @@
 # LUCID scene and tutor backend
 
+This branch uses a single GPT Realtime teacher. See **Single-model teacher** below for the active
+architecture; the original tutor flow described in older sections is the local fallback.
+
 ## Desktop / WebXR companion
 
 The connected frontend is in [`frontend/`](../frontend/README.md). For local demo
@@ -203,23 +206,31 @@ Curriculum links must mean "directly builds on": the baseline cost makes a weak 
 one end is well understood, so a loose shortcut would let routes skip prerequisites. A test
 simulates mastery on every advanced topic and asserts routes climb level by level.
 
-**Lesson planner.** With `ANTHROPIC_API_KEY` set, `backend/app/planner.py` asks Claude
-(`LUCID_PLANNER_MODEL`, default `claude-sonnet-5-5`, low effort, structured output) to pick a
-recipe and parameters for the learner's request, e.g. their own graph or function. Claude never
-writes coordinates or narration. Invalid parameters get one corrective retry; a second failure,
-refusal, timeout (12 s per call) or outage falls back to the keyword router (dot product/
-projection/vector, Dijkstra/shortest path, mean value theorem/MVT, else whiteboard). Requests
-opt into server-side refusal fallbacks (`fallbacks: "default"`). Planning runs outside the
-service lock and the epoch is rechecked before commit. `plan.planned_by` reports `claude` or
-`authored`; health reports `planner`. Learner text is never logged.
+**Single-model teacher.** The browser's `gpt-realtime-2.1` session plans and speaks lessons,
+writes animated diagram code, answers questions and grades learner answers. Only `OPENAI_API_KEY`
+is needed. No Claude provider is initialized, imported or called by the application runtime.
+Provider-independent schemas and prompts live in `teaching.py`; `realtime_tools.py` implements
+local authenticated brain, notes, lesson and assessment functions.
+
+`POST /api/voice/sessions {"lesson_id":"...","view":{...}}` preloads this learner's brain
+context, notes, review suggestions and exact screen into the Realtime session instructions.
+`POST /api/lessons/{id}/realtime-tools` accepts `{call_id,name,arguments,expected_epoch,view}`.
+The local tools enforce ownership, schema validation, graph proposals, idempotency and epochs.
+Scene writes return normal versioned scene events to the caller; no second model is invoked.
+`POST /api/lessons/{id}/realtime-interrupt` invalidates pending tool work while retaining objects.
+Tool inputs are capped at 256 KiB; compiled scene events remain capped at 16 KiB/30 objects.
+The same tools support typed turns through Realtime with text output and no microphone.
+
+The `author.py` and `planner.py` provider adapters remain as historical offline test fixtures;
+they are not loaded by this branch's application. `ANTHROPIC_API_KEY` has no effect on startup.
+
 `{"type":"interrupt","expected_epoch":1}` increments the epoch while keeping objects.
 `{"type":"scene.snapshot_request"}` retrieves compact state. Send `scene.ack` with a sequence
 to confirm receipt; this does not claim a frame was displayed. Ping with snapshot requests within 60 seconds.
 
 HTTP turns return events to their caller. WS turns return events to that socket. Other sockets
-must request a snapshot; this initial transport does not broadcast. There is no arbitrary client scene-write endpoint.
-All scene commands are server-authored. Provider calls are optional and occur when a planner,
-lesson author or voice provider is configured.
+must request a snapshot; this initial transport does not broadcast. Realtime scene code is always compiled and validated locally before being committed.
+All model reasoning stays in the configured Realtime session; local tools never call a provider.
 For graph-aware teaching, add explicit stable `sources` and `target` IDs to a turn; scores are never invented.
 Use the user-scoped learning-path, assessments and history endpoints in `/docs`.
 Assessments require current human revision and an idempotency key. A stale revision returns 409;
@@ -238,7 +249,7 @@ Use one uvicorn worker: lessons, cancellation epochs and the bounded snapshot ca
 Scenes survive socket loss but expire on process restart; graph history remains durable.
 There is a 128-lesson cap; `DELETE /api/lessons/ID` releases a slot.
 WS intake is limited to 20 commands per second, 16 KiB per message, with a 60-second idle deadline.
-HTTP writes are capped at 16 KiB. Terminate TLS for remote access; future headset clients require HTTPS/WSS.
+HTTP writes are capped at 16 KiB, except the bounded 256 KiB Realtime tool endpoint. Terminate TLS for remote access; future headset clients require HTTPS/WSS.
 Only trusted renderer code may interpret local slider bindings. Slider changes must stay local and never require model calls.
 
 This backend does not establish rendering, audio playback, GPU cleanup or physical headset acceptance.

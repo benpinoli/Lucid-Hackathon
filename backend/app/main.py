@@ -17,14 +17,13 @@ from pydantic import Field, ValidationError as SchemaError
 from memory_graph import Conflict, GraphError, MemoryGraph, NotFound, ResourceLimit
 
 from .scene import Id, MAX_BYTES, StrictModel
-from .author import ClaudeAuthor
 from .goals import Curriculum, Goals, GoalError
 from .tutor import Tutor
 from .learning import plan
 from .models import ModelError, ModelLibrary
-from .planner import ClaudePlanner
 from .service import TutorService
 from .voice import OpenAIRealtime, VoiceError
+from .realtime_tools import RealtimeTools
 
 FROM_ENV = object()
 
@@ -85,6 +84,19 @@ class Control(StrictModel):
     seq: Annotated[int, Field(ge=0)] = 0
 
 
+class VoiceSessionRequest(StrictModel):
+    lesson_id: Id
+    view: LearnerView | None = None
+
+
+class RealtimeToolRequest(StrictModel):
+    call_id: Id
+    name: Annotated[str, Field(max_length=80)]
+    arguments: dict
+    expected_epoch: Annotated[int, Field(ge=0)]
+    view: LearnerView | None = None
+
+
 class PathRequest(StrictModel):
     sources: Annotated[list[Id], Field(min_length=1, max_length=64)]
     target: Id
@@ -109,7 +121,9 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
         app.state.tokens = credentials
         app.state.graph = graph or MemoryGraph.open(os.getenv("LUCID_DATABASE_URL", "sqlite:///lucid.db"))
         # None keeps the keyword-routed authored lessons; no provider is ever required.
-        app.state.planner = ClaudePlanner.from_env() if planner is FROM_ENV else planner
+        # All model reasoning lives in the learner's single Realtime session.
+        # Explicit injected adapters remain available to offline tests only.
+        app.state.planner = None if planner is FROM_ENV else planner
         planner_fn = app.state.planner.plan if app.state.planner else plan
         curriculum = Curriculum().sync(app.state.graph)
         resolver = app.state.planner.resolver(curriculum) if app.state.planner else None
@@ -118,10 +132,10 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
         if author is not FROM_ENV:
             app.state.author = author
         else:
-            app.state.author = (ClaudeAuthor(app.state.planner.client, app.state.planner.model)
-                                if app.state.planner else None)
+            app.state.author = None
         app.state.service = TutorService(app.state.graph, planner_fn, goals,
                                          Tutor(app.state.graph, goals, planner_fn, app.state.author))
+        app.state.realtime_tools = RealtimeTools(app.state.service)
         # None disables voice; text lessons keep working without any provider.
         app.state.voice = OpenAIRealtime.from_env() if voice is FROM_ENV else voice
         # Catalog 3D models download on first use; prefetching fetches them all at startup.
@@ -167,7 +181,8 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
             chunks, size = [], 0
             async for chunk in request.stream():
                 size += len(chunk)
-                if size > MAX_BYTES:
+                limit = 262144 if request.url.path.endswith('/realtime-tools') else MAX_BYTES
+                if size > limit:
                     return JSONResponse({"error": "Request exceeds 16 KiB"}, status_code=413)
                 chunks.append(chunk)
             request._body = b"".join(chunks)
@@ -177,16 +192,22 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
     def health():
         return {"status": "ok", "scene_schema_version": 1,
                 "voice": "realtime" if app.state.voice else "text_only",
-                "planner": "claude" if app.state.planner else "authored",
-                "author": "claude" if app.state.author else "authored",
+                "planner": "realtime" if app.state.voice else "authored",
+                "author": "realtime" if app.state.voice else "authored",
+                "model": "gpt-realtime-2.1" if app.state.voice else None,
                 "formula_id": app.state.graph.methodology.formula_id,
                 "epsilon": app.state.graph.methodology.epsilon}
 
     @app.post("/api/voice/sessions", status_code=201)
-    def voice_session(user=Depends(identity)):
+    def voice_session(body: VoiceSessionRequest | None = None, user=Depends(identity)):
         if not app.state.voice:
             raise HTTPException(503, "Voice is not configured; set OPENAI_API_KEY on the backend")
         try:
+            if body:
+                with app.state.service.lock:
+                    context = app.state.realtime_tools.context(user, body.lesson_id,
+                        view=body.view.model_dump() if body.view else None)
+                return app.state.voice.create_credential(context=context)
             return app.state.voice.create_credential()
         except VoiceError as exc:
             raise HTTPException(502, str(exc)) from exc
@@ -226,6 +247,7 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
             app.state.service.owned(user, lesson_id)
             del app.state.service.lessons[lesson_id]
             app.state.service.sessions.pop(lesson_id, None)
+            app.state.realtime_tools.calls.pop(lesson_id, None)
 
     @app.post("/api/lessons/{lesson_id}/turns")
     def turn(lesson_id: str, body: Turn, user=Depends(identity)):
@@ -236,6 +258,21 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
     def tutor(lesson_id: str, body: TutorAction, user=Depends(identity)):
         return app.state.service.tutor_turn(user, lesson_id, body.action, body.text, body.expected_epoch,
                                             body.view.model_dump() if body.view else None)
+
+    @app.post("/api/lessons/{lesson_id}/realtime-tools")
+    def realtime_tool(lesson_id: str, body: RealtimeToolRequest, user=Depends(identity)):
+        try:
+            return app.state.realtime_tools.execute(user, lesson_id, body.call_id, body.name,
+                body.arguments, body.expected_epoch, body.view.model_dump() if body.view else None)
+        except (SchemaError, ValueError) as exc:
+            # A local compiler/schema error is actionable by the same Realtime model.
+            raise HTTPException(422, str(exc)[:1500]) from exc
+
+    @app.post("/api/lessons/{lesson_id}/realtime-interrupt")
+    def interrupt_realtime(lesson_id: str, user=Depends(identity)):
+        with app.state.service.lock:
+            state = app.state.service.owned(user, lesson_id)
+            return app.state.service.interrupt(user, lesson_id, state.epoch)
 
     @app.get("/api/me")
     def me(user=Depends(identity)):

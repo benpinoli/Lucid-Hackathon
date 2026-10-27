@@ -72,7 +72,7 @@ test('real backend: auth, lesson, local slider, reconnect, interruption and clea
   await expect(page.locator('#scene-meta')).toContainText('6 objects');
   await page.getByLabel('Or explore any concept freely').fill('A topic without a recipe');
   await page.getByRole('button', { name: 'Explore concept' }).click();
-  await expect(page.getByRole('alert')).toContainText('ANTHROPIC_API_KEY');
+  await expect(page.getByRole('alert')).toContainText('OPENAI_API_KEY');
   await page.getByLabel('Or explore any concept freely').fill('derivatives');
   await expect(page.locator('#status')).toHaveText('Connected');
   await page.getByRole('button', { name: 'Explore concept' }).click();

@@ -1,9 +1,9 @@
-"""Per-learner notes for the author model, behind Anthropic's memory tool (memory_20250818).
+"""Provider-independent per-learner notes for the Realtime teacher.
 
-Claude keeps short notes about how this learner learns (misconceptions, representations that
+The teacher keeps short notes about how this learner learns (misconceptions, representations that
 worked, preferences) under /memories. Notes are scoped to one learner, stored next to the
 lesson library in the graph database, and capped in size. The app preloads them into each
-request, so Claude only calls the tool to update them; reads never cost an extra round trip.
+request, so reads never cost an extra model round trip.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import posixpath
 import re
 from datetime import datetime, timezone
 
-from anthropic.lib.tools import BetaAbstractMemoryTool
+from types import SimpleNamespace
 from sqlalchemy import Column, MetaData, String, Table, Text, delete, insert, select, update
 
 ROOT = "/memories"
@@ -40,7 +40,7 @@ def _path(raw, *, root_ok=False):
 
 
 class LearnerMemory:
-    """The store; `for_learner` returns the tool Claude talks to, bound to one learner."""
+    """The store; `for_learner` returns a notes tool bound to one learner."""
 
     def __init__(self, graph):
         self.graph = graph
@@ -85,12 +85,21 @@ class LearnerMemory:
         return LearnerMemoryTool(self, user)
 
 
-class LearnerMemoryTool(BetaAbstractMemoryTool):
-    """Anthropic's memory tool interface over one learner's notes."""
+class LearnerMemoryTool:
+    """Provider-independent notes commands bound to one learner."""
 
     def __init__(self, store: LearnerMemory, user):
-        super().__init__()
         self.store, self.user = store, user
+
+    def to_dict(self):
+        # Compatibility for archived provider adapters; the live agent uses function tools.
+        return {"type": "memory_20250818", "name": "memory"}
+
+    def call(self, arguments):
+        command = arguments.get("command")
+        if command not in ("view", "create", "str_replace", "insert", "delete", "rename"):
+            raise MemoryError("Unknown notes command")
+        return getattr(self, command)(SimpleNamespace(**{"view_range": None, **arguments}))
 
     def _read(self, path):
         files = self.store.files(self.user)

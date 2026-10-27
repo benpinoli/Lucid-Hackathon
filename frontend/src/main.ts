@@ -5,7 +5,8 @@ import { LessonClient } from './client';
 import { LessonRenderer } from './renderer';
 import { ModelCache, type ModelInfo } from './models';
 import { localProjection, type Beat, type LearnerView, type Plan, type Snapshot, type TutorState } from './protocol';
-import { connectVoice, VoiceNarrator, type VoiceConnection } from './voice';
+import { connectVoice, type VoiceConnection } from './voice';
+import { RealtimeTeacher } from './realtime';
 
 document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <header><a class="brand" href="/">LUCID<span>LEARNING IN SPACE</span></a><span class="mode">DESKTOP / WEBXR</span><span id="status" role="status">Disconnected</span></header>
@@ -18,6 +19,7 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
         <section id="learning-day" hidden aria-label="Your learning day"><label>Your learning day</label><p class="hint">Learn something new, or start with a short retrieval warm-up.</p><div class="row wrap"><button id="learn-new" type="button" class="quiet">Learn something new</button><button id="warmup" type="button">Review due topics</button></div><p id="review-status" class="hint" role="status"></p><div id="review-topics"></div></section>
       <form id="goal"><label for="goal-text">What do you want to learn?</label><input id="goal-text" type="text" maxlength="500" placeholder="e.g. Fourier transforms" required /><label class="check"><input id="adaptive-route" type="checkbox" /> Use memory to skip familiar prerequisites</label><div class="row"><button id="goal-start" disabled>Start learning</button></div><p class="hint">Start from the beginning by default. Your saved knowledge stays intact.</p><p id="topic-status" class="hint" role="status"></p></form>
         <form id="reply" hidden><label for="reply-text" id="reply-label">Your answer</label><input id="reply-text" type="text" maxlength="2000" autocomplete="off" /><div class="row wrap"><button id="reply-send">Answer</button><button id="confused" type="button" class="quiet">I'm confused</button><button id="hint" type="button" class="quiet">Hint</button><button id="continue" type="button" class="quiet">Continue</button></div><p class="hint">With voice on, just talk: answer, ask, or say what's unclear.</p></form>
+        <div id="realtime-response" class="hint" aria-live="polite"></div>
       </section>
       <form id="turn"><label for="question">Or explore any concept freely</label><textarea id="question" maxlength="2000" rows="3">Explain dot product</textarea><div class="row"><button id="send" disabled>Explore concept <span>↗</span></button><button id="interrupt" type="button" class="quiet" disabled>Interrupt</button></div></form>
       <section class="voice" aria-label="Voice tutor"><label>Voice tutor</label><div class="row"><button id="voice" type="button" class="quiet" disabled>Start voice</button><button id="mute" type="button" class="quiet" disabled aria-pressed="false">Mute mic</button></div><label class="check"><input id="barge-in" type="checkbox" /> Interrupt by talking (use headphones)</label><p class="hint">Otherwise the mic opens when the tutor finishes. To cut in, press Interrupt or pull the VR trigger.</p><p id="voice-status" class="hint" role="status">Connect first. Voice also needs OPENAI_API_KEY on the backend.</p></section>
@@ -178,7 +180,6 @@ function showBeats(value?: Plan) {
     root.textContent = 'Send a new turn to receive the explanation.'; return;
   }
   renderer?.setMarker(value.generated ? 'AI-generated' : undefined);
-  if (value.planned_by === 'claude' && !value.generated) { const note = document.createElement('p'); note.className = 'hint'; note.textContent = 'Example chosen by Claude · every number computed and checked by LUCID.'; root.append(note); }
   for (const [index, beat] of value.beats.entries()) {
     const button = document.createElement('button'); button.className = 'beat';
     const number = document.createElement('span'); number.textContent = String(index + 1).padStart(2, '0');
@@ -209,27 +210,26 @@ let muted = false;
 let micOpen = true; // Turn-taking gate from the narrator; the learner's mute always wins.
 const applyMic = () => voice?.setMuted(muted || !micOpen);
 let sessionOpen = false;
-let pendingVoiceTurn: { resolve: (plan: Plan) => void; reject: (error: Error) => void } | undefined;
+let voiceAudio = false;
+let connectingRealtime: Promise<void> | undefined;
 const voiceStatus = (text: string) => { element('voice-status').textContent = text; };
-const narrator = new VoiceNarrator({
+const narrator = new RealtimeTeacher({
   send: event => voice?.send(event),
-  tutor: (action, text) => new Promise<Plan>((resolve, reject) => {
-    pendingVoiceTurn?.reject(new Error('Superseded by a newer request'));
-    client.command('tutor', text, { action, view: learnerView() });
-    pendingVoiceTurn = { resolve, reject };
-  }),
+  tool: (name, args, callId) => client.realtimeTool(name, args, callId, learnerView()),
   focusBeat: selectBeat,
   status: voiceStatus,
   setMicOpen: open => { micOpen = open; applyMic(); },
+  transcript: text => { typeset(element('realtime-response'), text); element('reply').hidden = false; },
+  interrupt: () => client.interruptRealtime(),
 });
 function updateVoiceControls() {
   const button = element<HTMLButtonElement>('voice'), mute = element<HTMLButtonElement>('mute');
-  button.textContent = voice ? 'Stop voice' : 'Start voice';
+  button.textContent = voice && voiceAudio ? 'Stop voice' : 'Start voice';
   button.disabled = !voice && !(sessionOpen && client.voiceAvailable);
-  mute.disabled = !voice; mute.textContent = muted ? 'Unmute mic' : 'Mute mic'; mute.setAttribute('aria-pressed', String(muted));
+  mute.disabled = !voice || !voiceAudio; mute.textContent = muted ? 'Unmute mic' : 'Mute mic'; mute.setAttribute('aria-pressed', String(muted));
 }
 function stopVoice(message = 'Voice off. Text controls still work.') {
-  const previous = voice; voice = undefined; narrator.stop(); previous?.close();
+  const previous = voice; voice = undefined; voiceAudio = false; narrator.stop(); previous?.close();
   if (previous) voiceStatus(message);
   updateVoiceControls();
 }
@@ -255,12 +255,10 @@ const client = new LessonClient({
     // With voice, the narrator starts each beat's animation as it speaks. Otherwise play the first
     // beat that moves (tutor steps usually lead with spoken intro lines that do not).
     if (!voice) playBeat(value.beats.find(beat => beat.animations?.length));
-    if (pendingVoiceTurn) { pendingVoiceTurn.resolve(value); pendingVoiceTurn = undefined; }
-    else if (voice) narrator.introduce(value);
+    // Realtime tool results resume the same model response; never start a second narrator.
   },
   error: text => {
     error(text);
-    pendingVoiceTurn?.reject(new Error(text)); pendingVoiceTurn = undefined;
   },
 });
 const models = new ModelCache(path => client.binary(path));
@@ -275,7 +273,7 @@ element('connection').addEventListener('submit', async event => {
   event.preventDefault(); clearError(); element<HTMLButtonElement>('connect').disabled = true;
   try {
     await client.connect(element<HTMLInputElement>('token').value); element<HTMLInputElement>('token').value = ''; element<HTMLButtonElement>('disconnect').disabled = false;
-    element('topic-status').textContent = client.authorAvailable ? 'Topic writer configured. Ask for a new topic to generate a diagram lesson.' : 'Built-in lessons ready. New topics need ANTHROPIC_API_KEY in the backend terminal, then a backend restart.';
+    element('topic-status').textContent = client.authorAvailable ? 'GPT Realtime teaches, draws and reads your brain. Type a topic or start voice.' : 'Built-in lessons ready. Set OPENAI_API_KEY on the backend for GPT Realtime lessons.';
     element<HTMLButtonElement>('goal-start').disabled = false;
     element('learning-day').hidden = false; void refreshReviews();
     // Warm the 3D model cache so lessons that use a model show it without waiting.
@@ -297,6 +295,11 @@ element('turn').addEventListener('submit', event => { event.preventDefault(); tu
 let tutorState: TutorState | null = null;
 function tutor(action: string, text = '') {
   clearError();
+  if (client.voiceAvailable) {
+    void ensureRealtime(false).then(() => narrator.request(action, text, element<HTMLInputElement>('adaptive-route').checked))
+      .catch(e => error(e instanceof Error ? e.message : 'Realtime request failed.'));
+    return;
+  }
   try { client.command('tutor', text, { action, view: learnerView() }); } catch (e) { error((e as Error).message); }
 }
 /** What the learner is looking at that only the client knows, so explanations can build on it. */
@@ -364,25 +367,35 @@ const wholeModel = element<HTMLInputElement>('whole-model');
 const updateManipulation = () => renderer?.setManipulation(manipulation.value as 'orbit' | 'translate' | 'rotate', wholeModel.checked);
 manipulation.onchange = updateManipulation; wholeModel.onchange = updateManipulation;
 element('reset-arrangement').onclick = () => renderer?.resetArrangement();
-element('voice').onclick = async () => {
-  if (voice) { stopVoice(); return; }
-  clearError(); element<HTMLButtonElement>('voice').disabled = true; voiceStatus('Connecting voice… allow microphone access if asked.');
-  try {
-    const credential = await client.voiceCredential();
+async function ensureRealtime(audio: boolean): Promise<void> {
+  if (voice && (voiceAudio || !audio)) return;
+  if (connectingRealtime) { await connectingRealtime; if (voice && (voiceAudio || !audio)) return; }
+  connectingRealtime = (async () => {
+    if (voice) stopVoice();
+    voiceStatus(audio ? 'Connecting voice? allow microphone access if asked.' : 'Connecting GPT Realtime?');
+    const credential = await client.voiceCredential(learnerView());
     const connection: VoiceConnection = await connectVoice(credential, event => narrator.handle(event), () => {
-      if (voice === connection) stopVoice('Voice disconnected. Text controls still work; start voice again to retry.');
-    });
-    voice = connection; muted = false; applyMic();
-    voiceStatus('Listening… try “explain Dijkstra’s algorithm”.');
-    if (plan) narrator.introduce(plan);
-  } catch (e) { voiceStatus(e instanceof Error ? e.message : 'Voice failed to start.'); }
+      if (voice === connection) stopVoice('Realtime disconnected. Submit your request to reconnect.');
+    }, { microphone: audio });
+    voice = connection; voiceAudio = audio; muted = false;
+    narrator.configure(audio); applyMic();
+    voiceStatus(audio ? 'Listening? tell me what you want to learn.' : 'GPT Realtime ready. Type what you want to learn.');
+    updateVoiceControls();
+  })();
+  try { await connectingRealtime; } finally { connectingRealtime = undefined; }
+}
+element('voice').onclick = async () => {
+  if (voice && voiceAudio) { stopVoice(); return; }
+  clearError(); element<HTMLButtonElement>('voice').disabled = true;
+  try { await ensureRealtime(true); }
+  catch (e) { error(e instanceof Error ? e.message : 'Realtime connection failed.'); }
   finally { updateVoiceControls(); }
 };
 element('mute').onclick = () => { muted = !muted; applyMic(); voiceStatus(muted ? 'Microphone muted.' : 'Listening…'); updateVoiceControls(); };
 element<HTMLInputElement>('barge-in').onchange = event => { narrator.bargeIn = (event.target as HTMLInputElement).checked; };
 // VR: a trigger pull that misses the slider buttons cuts the tutor off and opens the mic.
 renderer?.setXRInterrupt(() => narrator.stop());
-element('interrupt').onclick = () => { clearError(); narrator.stop(); try { client.command('interrupt'); showBeats(); } catch (e) { error((e as Error).message); } };
+element('interrupt').onclick = () => { clearError(); narrator.stop(); if (voice) return; try { client.command('interrupt'); showBeats(); } catch (e) { error((e as Error).message); } };
 element('reset').onclick = () => renderer?.resetView();
 function projectionView(model: boolean) {
   projectionModel = model;

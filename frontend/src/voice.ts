@@ -251,20 +251,22 @@ export type VoiceConnection = { send: (event: object) => void; setMuted: (muted:
 export type Credential = { client_secret: string; sdp_url: string };
 
 /** Browser-only WebRTC session: microphone up, speech down, events on a data channel. */
-export async function connectVoice(credential: Credential, onEvent: (event: RealtimeEvent) => void, onClosed: () => void): Promise<VoiceConnection> {
-  let microphone: MediaStream;
+export async function connectVoice(credential: Credential, onEvent: (event: RealtimeEvent) => void, onClosed: () => void,
+  options: { microphone?: boolean } = {}): Promise<VoiceConnection> {
+  let microphone: MediaStream | undefined;
   // Ask explicitly: some browsers and headsets default these off, and echo breaks turn-taking.
-  try { microphone = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
+  try { if (options.microphone !== false) microphone = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } }); }
   catch { throw new Error('Microphone permission was denied or no microphone is available.'); }
   const pc = new RTCPeerConnection();
   const audio = new Audio(); audio.autoplay = true;
   pc.ontrack = event => { audio.srcObject = event.streams[0]; };
-  pc.addTrack(microphone.getAudioTracks()[0], microphone);
+  if (microphone) pc.addTrack(microphone.getAudioTracks()[0], microphone);
+  else pc.addTransceiver('audio', { direction: 'recvonly' });
   const channel = pc.createDataChannel('oai-events');
   let closed = false;
   const close = () => {
     if (closed) return; closed = true;
-    channel.close(); pc.close(); microphone.getTracks().forEach(track => track.stop()); audio.srcObject = null; onClosed();
+    channel.close(); pc.close(); microphone?.getTracks().forEach(track => track.stop()); audio.srcObject = null; onClosed();
   };
   channel.onmessage = ({ data }) => {
     try {
@@ -288,7 +290,7 @@ export async function connectVoice(credential: Credential, onEvent: (event: Real
   } catch (error) { close(); throw error; }
   return {
     send: event => { if (channel.readyState === 'open') channel.send(JSON.stringify(event)); },
-    setMuted: muted => microphone.getAudioTracks().forEach(track => { track.enabled = !muted; }),
+    setMuted: muted => microphone?.getAudioTracks().forEach(track => { track.enabled = !muted; }),
     close,
   };
 }

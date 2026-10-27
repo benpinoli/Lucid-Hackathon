@@ -22,6 +22,7 @@ export class LessonClient {
   private busy = false;
   private awaiting: 'turn' | 'snapshot' | undefined;
   private generation = 0;
+  private toolGeneration = 0;
   /** Backend has a realtime voice provider configured. */
   voiceAvailable = false;
   authorAvailable = false;
@@ -56,7 +57,7 @@ export class LessonClient {
       const health = await this.api('GET', '/api/health');
       if (health.scene_schema_version !== 1) throw new Error('Backend scene version is unsupported.');
       this.voiceAvailable = health.voice === 'realtime';
-      this.authorAvailable = health.author === 'claude';
+      this.authorAvailable = health.author === 'realtime';
       const created = parseSnapshot(await this.api('POST', '/api/lessons'));
       if (generation !== this.generation) return;
       this.state = created;
@@ -67,11 +68,44 @@ export class LessonClient {
     }
   }
   /** Short-lived provider credential; the private backend token never leaves this client. */
-  async voiceCredential(): Promise<Credential> {
+  async voiceCredential(view?: LearnerView): Promise<Credential> {
     if (this.stopped) throw new Error('Connect before starting voice.');
-    const credential = await this.api('POST', '/api/voice/sessions');
+    const credential = await this.api('POST', '/api/voice/sessions', { lesson_id: this.state!.lesson_id, view });
     if (typeof credential?.client_secret !== 'string' || !/^https:\/\//.test(credential?.sdp_url)) throw new Error('Backend returned an invalid voice credential.');
     return credential;
+  }
+  /** Execute local graph/scene tools; reasoning stays in the existing Realtime connection. */
+  async realtimeTool(name: string, args: object, callId: string, view: LearnerView): Promise<Record<string, unknown>> {
+    if (!this.state || this.stopped || this.busy) throw new Error('Wait for the current command or reconnect.');
+    const generation = this.generation;
+    const toolGeneration = this.toolGeneration;
+    this.busy = true; this.awaiting = 'turn';
+    this.hooks.status('Updating lesson…', false);
+    try {
+      const result = await this.api('POST', `/api/lessons/${this.state.lesson_id}/realtime-tools`, {
+        name, arguments: args, call_id: callId, expected_epoch: this.state.turn_epoch, view,
+      });
+      if (generation !== this.generation || toolGeneration !== this.toolGeneration) throw new Error('Lesson request canceled.');
+      if (result.turn) {
+        const teaching = parsePlan(result.turn.plan);
+        const next = applyEvents(this.state, result.turn.events, result.turn.turn_epoch);
+        this.state = next; this.hooks.state(next); this.hooks.plan(teaching);
+      }
+      return result.output;
+    } finally {
+      if (generation === this.generation && toolGeneration === this.toolGeneration) {
+        this.busy = false; this.awaiting = undefined; this.hooks.status('Connected', true);
+      }
+    }
+  }
+  async interruptRealtime(): Promise<void> {
+    if (!this.state || this.stopped) return;
+    ++this.toolGeneration;
+    const generation = this.generation;
+    const next = parseSnapshot(await this.api('POST', `/api/lessons/${this.state.lesson_id}/realtime-interrupt`));
+    if (generation !== this.generation) return;
+    this.state = next; this.busy = false; this.awaiting = undefined;
+    this.hooks.state(next); this.hooks.status('Connected', true);
   }
   private send(data: object) {
     if (this.socket?.readyState !== WebSocket.OPEN) throw new Error('Connection is not ready.');

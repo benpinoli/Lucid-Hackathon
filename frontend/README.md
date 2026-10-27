@@ -48,37 +48,33 @@ parameter smoothly; pause, change speed, drag the slider, or reset to the origin
 Playback runs locally. Equations use LaTeX via KaTeX below the drawing, and narration stays
 outside the geometry. Generated lessons default to 2D unless depth is useful.
 
-**Tutor.** After connecting, say (with voice on) or type what you want to learn and select
-**Start learning**. The default teaches your requested topic from the beginning, including
-previously mastered topics. Enable **Use memory to skip familiar prerequisites** for starting
-questions and an adaptive route through your graph. Every explanation has a diagram;
-move its sliders to explore. Answer the check question at the end of each lesson, or
-select **I'm confused** (or just say so) for a deeper explanation. **Continue** repeats a pending
-question. Your graph persists and only graded answers change mastery. With
-`ANTHROPIC_API_KEY` set, Claude writes new explanations, grades free-form answers and adds missing
-concepts; those scenes carry a small "AI-generated" marker.
+**One Realtime teacher.** Set `OPENAI_API_KEY` in the backend terminal before starting it.
+This branch uses only **gpt-realtime-2.1** for speech, typed replies, lesson planning, diagram
+code, hints, new concepts and grading. No Anthropic key or second model is used. Without an
+OpenAI key the checked built-in examples still work locally.
 
-**Claude lesson planner (optional).** Export `ANTHROPIC_API_KEY` in the backend terminal too.
-Then requests such as "Dijkstra from S to T on my graph: S–X 2, X–T 3, S–T 9" or "mean value
-theorem for x³ − 3x on [−2, 2]" get a matching example. Claude only chooses parameters; LUCID
-computes and checks every number, and the explanation panel notes when Claude chose the example.
-Without the key, the authored default examples are used.
+Type a topic and choose **Start learning**, or choose **Start voice** and speak. Typed requests
+open the same Realtime connection without microphone permission and request text output.
+Voice enables the microphone and audio output; typed follow-ups then share that conversation.
+The backend preloads brain context, learner notes and the current screen into the session.
+Tools refresh this context, create concepts, compile diagram code, publish a step, advance
+prepared steps, ask questions and save evidence-backed assessments. Scene code is the same
+validated expression/diagram language used by the renderer; no arbitrary Python or JavaScript
+is executed. Errors go back to the same model for repair.
 
-**Voice turn-taking.** Each tutor reply is spoken as one continuous response (no gaps between
-steps); diagram highlights follow the playback clock and self-calibrate to the voice's pace. The
-microphone closes while the tutor speaks and reopens shortly after, so echo or noise cannot cut a
-question off. Turn detection waits for a finished thought (`LUCID_VOICE_EAGERNESS`, default `low`;
-`LUCID_VOICE_NOISE_REDUCTION`, default `near_field`, or `far_field`/`off`). To cut in, press
-**Interrupt** or pull the VR trigger away from the slider buttons; with headphones you can enable
-**Interrupt by talking**.
+Each lesson presents one small visual step, then listens. **Continue** requests the next step;
+silence never advances a lesson. **I'm confused**, **Hint**, **Review**, and **Go deeper** go to
+this same agent. Lessons keep the Jay Cummings style guidance and problem-first approach.
+Only actual graded answers update mastery. Skipping a question and viewing a lesson do not.
+The optional adaptive-route checkbox asks the teacher to bridge through familiar prerequisites.
 
-**Voice tutor (optional).** Export `OPENAI_API_KEY` in the backend terminal before starting it
-(optionally `LUCID_VOICE_MODEL`, default `gpt-realtime-2.1`, and `LUCID_VOICE_NAME`, default `marin`).
-After connecting, select **Start voice**, allow the microphone, and ask for a topic out loud. The tutor
-shows the lesson, then reads each authored step aloud, highlighting it as its audio starts. Speak to
-interrupt; select a step to hear just that step. The key stays on the backend: the browser receives
-only a 10-minute credential and talks to OpenAI directly over WebRTC. A headset needs HTTPS for the
-microphone. Without a key, voice is disabled and everything else works.
+**Turn-taking.** `LUCID_VOICE_EAGERNESS` defaults to `low` and
+`LUCID_VOICE_NOISE_REDUCTION` to `near_field` (`far_field`/`off` also supported).
+`LUCID_VOICE_NAME` defaults to `marin`. The model is fixed to `gpt-realtime-2.1` on this branch.
+Use **Interrupt** or the VR trigger to cut speech off; headphones are recommended for
+**Interrupt by talking**. Canceled tools cannot overwrite a later scene. The private OpenAI
+key remains on the backend; the browser receives a ten-minute credential over authenticated
+HTTP and connects to OpenAI with WebRTC. A headset microphone requires HTTPS.
 
 Keep both terminals running. Ctrl+C stops each service. Lessons expire when the backend
 process stops, while graph data in the demo database persists. Reconnect creates a

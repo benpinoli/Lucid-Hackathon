@@ -342,7 +342,8 @@ def test_voice_credential_is_minted_server_side(tmp_path):
     assert request.headers["authorization"] == "Bearer sk-secret"
     session = json.loads(request.content)["session"]
     assert session["type"] == "realtime" and session["audio"]["output"]["voice"] == "marin"
-    assert [tool["name"] for tool in session["tools"]] == ["tutor"]
+    from backend.app.realtime_tools import DEFINITIONS
+    assert [tool["name"] for tool in session["tools"]] == list(DEFINITIONS)
     assert session["audio"]["input"]["turn_detection"] == {
         "type": "semantic_vad", "eagerness": "low", "create_response": True, "interrupt_response": True}
     assert session["audio"]["input"]["noise_reduction"] == {"type": "near_field"}
@@ -366,7 +367,7 @@ def test_voice_from_env(monkeypatch):
     assert OpenAIRealtime.from_env() is None
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
     monkeypatch.setenv("LUCID_VOICE_MODEL", "gpt-realtime")
-    assert OpenAIRealtime.from_env().model == "gpt-realtime"
+    assert OpenAIRealtime.from_env().model == "gpt-realtime-2.1"
     monkeypatch.setenv("LUCID_VOICE_EAGERNESS", "medium")
     monkeypatch.setenv("LUCID_VOICE_NOISE_REDUCTION", "off")
     voice = OpenAIRealtime.from_env()
@@ -531,7 +532,7 @@ def test_planner_wired_into_app(tmp_path):
     human = graph.create_human()
     app = create_app(graph, {TOKEN: human.human_id}, voice=None, planner=ClaudePlanner(client))
     with graph, TestClient(app) as http:
-        assert http.get("/api/health").json()["planner"] == "claude"
+        assert http.get("/api/health").json()["planner"] == "authored"  # Explicit test adapter only.
         lesson = http.post("/api/lessons", headers=headers()).json()["lesson_id"]
         body = http.post(f"/api/lessons/{lesson}/turns", headers=headers(),
                          json={"text": "project (-1, 3) onto (2, 1)", "expected_epoch": 0}).json()
@@ -1274,7 +1275,7 @@ def test_tutor_over_websocket_and_http(tmp_path):
         assert done["plan"]["tutor"]["mode"] == "done"
         missing = client.post(f"/api/lessons/{lesson}/tutor", headers=headers(),
                               json={"action": "goal", "text": "quantum tunnelling", "expected_epoch": 3})
-        assert missing.status_code == 404 and "ANTHROPIC_API_KEY" in missing.json()["detail"]
+        assert missing.status_code == 404 and "OPENAI_API_KEY" in missing.json()["detail"]
         assert client.delete(f"/api/lessons/{lesson}", headers=headers()).status_code == 204
         assert lesson not in app.state.service.sessions
 

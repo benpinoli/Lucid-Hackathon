@@ -1,4 +1,4 @@
-"""Claude chooses which recipe to teach and with which example; recipes compute everything.
+"""Legacy provider adapter retained for offline regression tests; not loaded by the app.
 
 Claude never writes coordinates, numbers or narration. It returns typed parameters, a
 builder in `learning.py` validates and computes the lesson, and any failure (invalid

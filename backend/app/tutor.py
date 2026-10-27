@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from memory_graph import AmbiguousConcept, NotFound
 
-from .author import UNSURE, Check, LessonScript, ScriptStep, grade_locally
+from .teaching import UNSURE, Check, LessonScript, ScriptStep, grade_locally
 from .conversation import PHRASES, Phrasing, echo, glue, joined, options_redundant
 from .diagrams import AUTHORED, compile_lesson
 from .goals import KNOWN, GoalError, Topic, _wrap, concept_card
@@ -370,7 +370,7 @@ class Tutor:
             graded = self.author.grade(q.prompt, q.expected, text)
             if graded:
                 return graded
-        if self.author and choices and not grade_locally(text, q.expected, choices, correct)[0] in ("correct", "wrong"):
+        if self.author and choices and grade_locally(text, q.expected, choices, correct)[0] not in ("correct", "wrong"):
             graded = self.author.grade(q.prompt, q.expected, text, choices)
             if graded:
                 return graded
@@ -983,12 +983,12 @@ class Tutor:
         if concept is None and create and self.author:
             concept = self._create(text, link_to)
             if concept is None:
-                raise GoalError("The topic writer couldn't create that lesson. Check the backend's "
-                                "Anthropic configuration and try again. Existing lessons still work.")
+                raise GoalError("The topic writer couldn't create that lesson. Try the realtime session again. "
+                                "Existing lessons still work.")
         if (concept is None and create and not self.author and self.curriculum.match(text) is None
                 and authored_plan(text).recipe_id == "whiteboard_v1"):
-            raise GoalError("New topics need ANTHROPIC_API_KEY on the backend. Restart the backend "
-                            "after setting it. You can explore the built-in topics now.")
+            raise GoalError("New topics need OPENAI_API_KEY on the backend and an active Realtime session. "
+                            "Restart the backend after setting it. You can explore the built-in topics now.")
         if concept is None:
             concept = self.curriculum.match(text)
         if concept is None and self.goals.resolver is not None:
@@ -1008,15 +1008,16 @@ class Tutor:
         ids = self._store_specs([spec], evidence="Learner requested a concept", link_to=link_to)
         return ids[0] if ids else None
 
-    def _store_specs(self, specs, evidence, link_to=None):
+    def _store_specs(self, specs, evidence, link_to=None, source="claude", model=None):
         # The transaction resolves concurrent duplicates before building revision-bound proposals.
         with self.graph.transaction():
-            return self._store_specs_locked(specs, evidence, link_to)
+            return self._store_specs_locked(specs, evidence, link_to, source, model)
 
-    def _store_specs_locked(self, specs, evidence, link_to):
+    def _store_specs_locked(self, specs, evidence, link_to, source="claude", model=None):
         snapshot = self.graph.snapshot()
         names = {node.label.casefold(): node.id for node in snapshot.nodes.values()}
-        provenance = {"source": "claude", "model": self.author.model}
+        model = model or self.author.model
+        provenance = {"source": source, "model": model}
         commands, ids = [], []
         for spec in specs:
             name = re.sub(r"\s+", " ", spec.name.strip())[:80]
@@ -1044,7 +1045,7 @@ class Tutor:
         if not commands:
             return [c for _, c in ids]
         proposal = self.graph.proposals.submit({
-            "source": f"claude:{self.author.model}", "evidence": [evidence],
+            "source": f"{source}:{model}", "evidence": [evidence],
             "confidence": 0.5, "expected_revisions": {"god": self.graph.god.revision}, "commands": commands})
         self.graph.proposals.accept(proposal)
         return [c for _, c in ids]
