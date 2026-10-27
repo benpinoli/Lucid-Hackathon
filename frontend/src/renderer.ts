@@ -68,7 +68,7 @@ export class LessonRenderer {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.xr.enabled = true;
     this.renderer.xr.setReferenceSpaceType('local-floor');
-    this.renderer.setClearColor(0x101f2a);
+    this.renderer.setClearColor(0x0b1020);
     this.renderer.domElement.setAttribute('aria-label', 'Interactive lesson scene. Drag to orbit; scroll to zoom.');
     this.renderer.domElement.addEventListener('webglcontextlost', event => { event.preventDefault(); onError('Graphics context lost. Reload this page to restore rendering.'); });
     host.append(this.renderer.domElement);
@@ -86,7 +86,6 @@ export class LessonRenderer {
     this.renderer.domElement.addEventListener('pointerdown', this.selectObject);
     this.raycaster.params.Line = { threshold: 0.04 };
     this.board.add(this.marker);
-    const floor = new THREE.GridHelper(20, 40, 0x294653, 0x1b303e); floor.position.y = -0.01; this.scene.add(floor);
     this.caption.position.set(0, 0.48, -2.5);
     this.xrButtons.position.set(0, 0.85, -2.5);
     for (const direction of [-1, 1]) {
@@ -132,6 +131,8 @@ export class LessonRenderer {
     this.renderer.setAnimationLoop(time => {
       if (this.lastFrame && time > this.lastFrame) { this.frameTimes.push(time - this.lastFrame); if (this.frameTimes.length > 120) this.frameTimes.shift(); }
       this.lastFrame = time;
+      // Narration belongs below the drawing on desktop, never across the geometry.
+      this.caption.visible = this.renderer.xr.isPresenting;
       this.controls.update(); this.renderer.render(this.scene, this.camera);
       if (time - this.lastReport > 1000 && this.frameTimes.length) {
         const sorted = [...this.frameTimes].sort((a, b) => a - b);
@@ -231,10 +232,20 @@ export class LessonRenderer {
     this.transform.detach();
     for (const child of this.board.children) if (child.userData.nodeId) this.placements.set(child.name, {
       position: child.position.clone(), quaternion: child.quaternion.clone(), scale: child.scale.clone() });
-    this.board.remove(this.marker); disposeTree(this.board); this.board.add(this.marker);
+    const retained = new Map(this.board.children.filter(child => child.userData.nodeId).map(child => [child.name, child]));
+    const incoming = new Set(nodes.filter(n => n.visible).map(n => n.id));
+    for (const [id, child] of retained) if (!incoming.has(id)) { this.board.remove(child); disposeTree(child); retained.delete(id); }
     for (const node of nodes) {
       if (!node.visible) continue;
+      const signature = JSON.stringify(node) + (node.content.primitive.startsWith('expr_') ? JSON.stringify(params) : '');
+      const existing = retained.get(node.id);
+      if (existing?.userData.signature === signature) {
+        if (selected === node.id && this.manipulationMode !== 'orbit' && !this.renderer.xr.isPresenting) this.transform.attach(existing);
+        continue;
+      }
+      if (existing) { this.board.remove(existing); disposeTree(existing); }
       const group = new THREE.Group(); group.name = node.id; group.userData.nodeId = node.id;
+      group.userData.signature = signature;
       const color = colors[node.style]; const c = node.content;
       const line = (points: number[][], tint = color) => {
         const geometry = new THREE.BufferGeometry().setFromPoints(points.map(point => vector(point)));
@@ -293,8 +304,11 @@ export class LessonRenderer {
           side: THREE.DoubleSide, transparent: true, opacity: 0.55 })));
       }
       else if (c.primitive === 'text_label') {
-        const sprite = label(c.text, '#d5e8ee', 9, 0.7, true);
-        sprite.position.set(c.position[0], c.position[1] + (node.id === 'formula' ? -4.2 : 0), c.position[2] ?? 0.1); group.add(sprite);
+        // Equations have a dedicated accessible, typeset panel outside the drawing.
+        if (!(node.id === 'formula' || c.text.includes('$') || c.text.includes('\\('))) {
+          const sprite = label(c.text, '#d5e8ee', node.id === 'title' ? 8 : 6, node.id === 'title' ? 0.48 : 0.34, true);
+          sprite.position.set(c.position[0], c.position[1], c.position[2] ?? 0.1); group.add(sprite);
+        }
       }
       this.styleFocus(group, node.id);
       this.board.add(group);

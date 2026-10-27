@@ -17,7 +17,7 @@ from memory_graph import Conflict, GraphError, MemoryGraph, NotFound, ResourceLi
 
 from .scene import Id, MAX_BYTES, StrictModel
 from .author import ClaudeAuthor
-from .goals import Curriculum, Goals
+from .goals import Curriculum, Goals, GoalError
 from .tutor import Tutor
 from .learning import plan
 from .planner import ClaudePlanner
@@ -319,6 +319,8 @@ def create_app(graph=None, tokens=None, origins=None, voice=FROM_ENV, planner=FR
                             if control.type == "scene.ack" and control.seq > state.seq:
                                 raise ValueError("Cannot acknowledge an unsent sequence")
                         await ws.send_json({"type": "scene.snapshot", "snapshot": current})
+                except GoalError as exc:
+                    await ws.send_json({"type": "error", "detail": str(exc)})
                 except (SchemaError, ValueError, GraphError, AttributeError):
                     await ws.send_json({"type": "error", "detail": "Invalid or stale command; request snapshot"})
         except (WebSocketDisconnect, TimeoutError):

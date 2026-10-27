@@ -1,4 +1,6 @@
 import './style.css';
+import { typeset } from './math';
+import { ShadowStory } from './shadow';
 import { LessonClient } from './client';
 import { LessonRenderer } from './renderer';
 import { localProjection, type Plan, type Snapshot, type TutorState } from './protocol';
@@ -9,11 +11,11 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
   <main>
     <aside>
       <div class="eyebrow">YOUR LEARNING STUDIO</div><h1>Make room for<br>understanding.</h1>
-      <p class="intro">Explore ideas in a space you can move through. Try the dot product, Dijkstra's algorithm, or the mean value theorem.</p>
+      <p class="intro">See the problem. Move the picture. Discover the mathematics. Try dot product, derivatives, or a topic of your own.</p>
       <form id="connection"><label for="token">Private backend token</label><input id="token" type="password" autocomplete="off" placeholder="Paste the demo token" required /><div class="row"><button id="connect">Connect</button><button id="disconnect" type="button" class="quiet" disabled>Disconnect</button></div><p class="hint">Held in memory for this session only.</p></form>
       <section class="tutor" aria-label="Tutor">
         <section id="learning-day" hidden aria-label="Your learning day"><label>Your learning day</label><p class="hint">Learn something new, or start with a short retrieval warm-up.</p><div class="row wrap"><button id="learn-new" type="button" class="quiet">Learn something new</button><button id="warmup" type="button">Review due topics</button></div><p id="review-status" class="hint" role="status"></p><div id="review-topics"></div></section>
-        <form id="goal"><label for="goal-text">What do you want to learn?</label><input id="goal-text" type="text" maxlength="500" placeholder="e.g. the mean value theorem" required /><div class="row"><button id="goal-start" disabled>Start learning</button></div></form>
+      <form id="goal"><label for="goal-text">What do you want to learn?</label><input id="goal-text" type="text" maxlength="500" placeholder="e.g. Fourier transforms" required /><label class="check"><input id="adaptive-route" type="checkbox" /> Use memory to skip familiar prerequisites</label><div class="row"><button id="goal-start" disabled>Start learning</button></div><p class="hint">Start from the beginning by default. Your saved knowledge stays intact.</p><p id="topic-status" class="hint" role="status"></p></form>
         <form id="reply" hidden><label for="reply-text" id="reply-label">Your answer</label><input id="reply-text" type="text" maxlength="2000" autocomplete="off" /><div class="row wrap"><button id="reply-send">Answer</button><button id="confused" type="button" class="quiet">I'm confused</button><button id="continue" type="button" class="quiet">Continue</button></div><p class="hint">With voice on, just talk: answer, ask, or say what's unclear.</p></form>
       </section>
       <form id="turn"><label for="question">Or explore any concept freely</label><textarea id="question" maxlength="2000" rows="3">Explain dot product</textarea><div class="row"><button id="send" disabled>Explore concept <span>↗</span></button><button id="interrupt" type="button" class="quiet" disabled>Interrupt</button></div></form>
@@ -23,7 +25,12 @@ document.querySelector<HTMLDivElement>('#app')!.innerHTML = `
       <p class="footnote">Active lessons · Text or voice<br>Predict, explain, connect, and recall</p>
     </aside>
     <section class="workspace" aria-label="Lesson workspace"><div class="toolbar"><div><span class="live-dot"></span><strong>Concept space</strong><span id="scene-meta">Awaiting lesson</span></div><div class="row"><button id="reset" class="quiet">Reset view</button><div id="xr"></div></div></div>
+      <div id="projection-views" class="row" hidden><button id="view-story" class="quiet" type="button" aria-pressed="true">Shadow story</button><button id="view-model" class="quiet" type="button" aria-pressed="false">Vector model</button></div>
+      <section id="shadow-story" hidden aria-label="Shadow thought experiment"></section>
       <div id="viewport"><div id="empty"><span>01 / VECTOR LAB</span><h2>A new perspective<br>starts here.</h2><p>Connect your backend to bring the lesson into view.</p></div></div>
+      <section id="math-panel" aria-label="Lesson equations" hidden></section>
+      <p id="scene-caption" class="scene-caption" aria-live="polite"></p>
+      <div id="playback" class="row wrap" hidden><button id="play-animation" type="button">Play animation</button><button id="restart-animation" type="button" class="quiet">Reset parameters</button><label for="animation-parameter">Animate</label><select id="animation-parameter"></select><label for="animation-speed">Speed</label><select id="animation-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="2">2×</option></select></div>
       <div class="row wrap" aria-label="Scene manipulation"><label for="manipulation">Interaction</label><select id="manipulation"><option value="orbit">Orbit camera</option><option value="translate">Move model</option><option value="rotate">Rotate model</option></select><label class="check"><input id="whole-model" type="checkbox" checked /> Whole model</label><button id="reset-arrangement" type="button" class="quiet">Reset arrangement</button></div>
       <div class="scene-bottom"><div class="legend" id="legend"><span>● u / projection</span><span>● v</span></div><span>Drag to orbit · Scroll to zoom</span></div>
       <section id="sliders" aria-label="Local scene controls"></section>
@@ -40,6 +47,37 @@ try { renderer = new LessonRenderer(element('viewport'), element('xr'), text => 
 catch { error('WebGL is unavailable. Enable browser hardware acceleration and reload. Backend controls and lesson text are still usable.'); element('metrics').textContent = 'Renderer unavailable'; }
 let snapshot: Snapshot | undefined;
 let plan: Plan | undefined;
+let projectionModel = false;
+const story = new ShadowStory(element('shadow-story'));
+let playing = false;
+let animationTime = 0;
+let animationFrame = 0;
+let animationPhase = 0;
+let animationBinding = '';
+const parameterUpdates = new Map<string, (value: number) => void>();
+function pauseAnimation() {
+  playing = false; cancelAnimationFrame(animationFrame);
+  element('play-animation').textContent = 'Play animation';
+}
+function animateFrame(time: number) {
+  if (!playing) return;
+  if (time - animationTime < 1000 / 30) { animationFrame = requestAnimationFrame(animateFrame); return; }
+  const delta = Math.min(100, time - animationTime); animationTime = time;
+  const binding = element<HTMLSelectElement>('animation-parameter').value;
+  const c = snapshot?.nodes.find(n => n.content.primitive === 'slider' && n.content.binding === binding)?.content;
+  if (c?.primitive === 'slider') {
+    const speed = Number(element<HTMLSelectElement>('animation-speed').value);
+    const current = overrides.get(binding) ?? c.value;
+    if (binding !== animationBinding) {
+      animationBinding = binding;
+      animationPhase = Math.acos(1 - 2 * (current - c.minimum) / (c.maximum - c.minimum));
+    }
+    animationPhase += delta / 12000 * speed * Math.PI * 2;
+    const value = c.minimum + (1 - Math.cos(animationPhase)) / 2 * (c.maximum - c.minimum);
+    parameterUpdates.get(binding)?.(value);
+  }
+  animationFrame = requestAnimationFrame(animateFrame);
+}
 let visualKey = '';
 const overrides = new Map<string, number>();
 function draw() {
@@ -56,7 +94,11 @@ function draw() {
     const length = overrides.get('projection.length');
     if (angle !== undefined || length !== undefined) nodes = localProjection(nodes, angle ?? angleSlider.content.value, length);
   }
-  renderer?.render(nodes, params);
+  const projectionLesson = plan?.recipe_id === 'vector_projection_v1';
+  story.update(nodes, projectionLesson && !projectionModel);
+  element('projection-views').hidden = !projectionLesson;
+  element('viewport').hidden = projectionLesson && !projectionModel;
+  if (!element('viewport').hidden) renderer?.render(nodes, params);
 }
 /** Smallest 1-2-5 step at least `raw`, so slider values read cleanly (0.05, not 0.03). */
 function niceStep(raw: number) {
@@ -64,7 +106,10 @@ function niceStep(raw: number) {
   return [1, 2, 5, 10].map(m => m * power).find(step => step >= raw - 1e-12)!;
 }
 function renderSliders() {
+  pauseAnimation(); parameterUpdates.clear();
+  const choices = element<HTMLSelectElement>('animation-parameter'); choices.replaceChildren();
   const root = element('sliders'); root.replaceChildren(); renderer?.setXRSlider();
+  element('playback').hidden = true;
   if (!snapshot) return;
   let xrBound = false;
   for (const node of snapshot.nodes) {
@@ -80,14 +125,17 @@ function renderSliders() {
     const update = (value: number) => {
       const bounded = Math.min(c.maximum, Math.max(c.minimum, value));
       overrides.set(c.binding, bounded); input.value = String(bounded); output.textContent = `${bounded.toFixed(projection ? 1 : 2)}${unit}`;
-      renderer?.setFocus([]); renderer?.setCaption('Local exploration · reset the lesson with a new turn.');
+      renderer?.setFocus([]);
       draw();
     };
-    input.addEventListener('input', () => update(Number(input.value)));
+    parameterUpdates.set(c.binding, update);
+    choices.append(Object.assign(document.createElement('option'), { value: c.binding, textContent: name }));
+    input.addEventListener('input', () => { pauseAnimation(); update(Number(input.value)); });
     label.append(output, input); root.append(label);
     if (!xrBound) { xrBound = true; renderer?.setXRSlider(direction => update(Number(input.value) + direction * (projection ? 5 : (c.maximum - c.minimum) / 20)), projection ? 'angle' : name); }
   }
-  if (root.childElementCount) { const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = 'Explore locally · sliders update this view without network calls. Teaching text describes the original scene.'; root.append(hint); }
+  element('playback').hidden = parameterUpdates.size === 0;
+  if (root.childElementCount) { const hint = document.createElement('p'); hint.className = 'hint'; hint.textContent = 'Press Play to see the parameter change, or drag a slider. Animation runs locally; spoken example values describe the starting state.'; root.append(hint); }
 }
 // Primary (teal) and secondary (orange) style meanings per authored recipe.
 const legends: Record<string, string[]> = {
@@ -100,23 +148,35 @@ function showBeats(value?: Plan) {
   plan = value; const root = element('beats'); root.replaceChildren();
   if (value) element('legend').replaceChildren(...(legends[value.recipe_id] ?? []).map(text => Object.assign(document.createElement('span'), { textContent: `● ${text}` })));
   renderer?.setFocus([]); renderer?.setCaption('');
-  if (!value) { root.textContent = 'Send a new turn to receive the explanation.'; return; }
+  if (!value) {
+    pauseAnimation(); element('shadow-story').hidden = true; element('projection-views').hidden = true;
+    element('viewport').hidden = false; element('math-panel').hidden = true; element('scene-caption').textContent = '';
+    root.textContent = 'Send a new turn to receive the explanation.'; return;
+  }
   renderer?.setMarker(value.generated ? 'AI-generated' : undefined);
   if (value.planned_by === 'claude' && !value.generated) { const note = document.createElement('p'); note.className = 'hint'; note.textContent = 'Example chosen by Claude · every number computed and checked by LUCID.'; root.append(note); }
   for (const [index, beat] of value.beats.entries()) {
     const button = document.createElement('button'); button.className = 'beat';
     const number = document.createElement('span'); number.textContent = String(index + 1).padStart(2, '0');
-    const text = document.createElement('span'); text.textContent = beat.say_text;
+    const text = document.createElement('span'); typeset(text, beat.say_text);
     button.append(number, text); button.onclick = () => { selectBeat(index); if (voice) narrator.speakBeat(value, index); };
     root.append(button);
   }
   // Full scene initially visible; focus is an explicit reader action.
   renderer?.setCaption(value.beats[0]?.say_text ?? '');
+  typeset(element('scene-caption'), value.beats[0]?.say_text ?? '');
+  const formulas = snapshot?.nodes.filter(n => n.visible && n.content.primitive === 'text_label' && (n.id === 'formula' || n.content.text.includes('$') || n.content.text.includes('\\('))) ?? [];
+  const mathPanel = element('math-panel'); mathPanel.replaceChildren(); mathPanel.hidden = formulas.length === 0;
+  for (const node of formulas) if (node.content.primitive === 'text_label') {
+    const equation = document.createElement('div'); typeset(equation, node.content.text); mathPanel.append(equation);
+  }
+  draw();
 }
 function selectBeat(index: number) {
   const beat = plan?.beats[index]; if (!beat) return;
   element('beats').querySelectorAll('button').forEach((button, i) => { if (i === index) button.setAttribute('aria-pressed', 'true'); else button.removeAttribute('aria-pressed'); });
   renderer?.setFocus(beat.focus_ids); renderer?.setCaption(beat.say_text);
+  typeset(element('scene-caption'), beat.say_text);
 }
 let voice: VoiceConnection | undefined;
 let muted = false;
@@ -178,6 +238,7 @@ element('connection').addEventListener('submit', async event => {
   event.preventDefault(); clearError(); element<HTMLButtonElement>('connect').disabled = true;
   try {
     await client.connect(element<HTMLInputElement>('token').value); element<HTMLInputElement>('token').value = ''; element<HTMLButtonElement>('disconnect').disabled = false;
+    element('topic-status').textContent = client.authorAvailable ? 'Topic writer configured. Ask for a new topic to generate a diagram lesson.' : 'Built-in lessons ready. New topics need ANTHROPIC_API_KEY in the backend terminal, then a backend restart.';
     element<HTMLButtonElement>('goal-start').disabled = false;
     element('learning-day').hidden = false; void refreshReviews();
     voiceStatus(client.voiceAvailable ? 'Voice is available. Start voice, then ask about a topic out loud.' : 'Voice is off: the backend has no OPENAI_API_KEY. Text lessons work normally.');
@@ -208,7 +269,7 @@ function showTutor(value: Plan) {
   if (value.tutor.exercise && value.tutor.exercise !== 'check' && value.tutor.exercise !== 'diagnostic') element('reply-label').textContent = `Your answer · ${value.tutor.exercise.startsWith('prediction') ? 'Predict and explain' : value.tutor.exercise === 'synthesis' ? 'Connect the ideas' : value.tutor.exercise === 'teachback' ? 'Teach it back' : 'Recall from memory'}`;
   element('reply-send').textContent = awaiting ? 'Answer' : 'Ask';
 }
-element('goal').addEventListener('submit', event => { event.preventDefault(); tutor('goal', element<HTMLInputElement>('goal-text').value); });
+element('goal').addEventListener('submit', event => { event.preventDefault(); tutor(element<HTMLInputElement>('adaptive-route').checked ? 'goal' : 'explore', element<HTMLInputElement>('goal-text').value); });
 element('reply').addEventListener('submit', event => {
   event.preventDefault();
   const input = element<HTMLInputElement>('reply-text'); const text = input.value;
@@ -272,4 +333,23 @@ element<HTMLInputElement>('barge-in').onchange = event => { narrator.bargeIn = (
 renderer?.setXRInterrupt(() => narrator.stop());
 element('interrupt').onclick = () => { clearError(); narrator.stop(); try { client.command('interrupt'); showBeats(); } catch (e) { error((e as Error).message); } };
 element('reset').onclick = () => renderer?.resetView();
+function projectionView(model: boolean) {
+  projectionModel = model;
+  element('view-story').setAttribute('aria-pressed', String(!model));
+  element('view-model').setAttribute('aria-pressed', String(model)); draw();
+}
+element('view-story').onclick = () => projectionView(false);
+element('view-model').onclick = () => projectionView(true);
+element('play-animation').onclick = () => {
+  if (playing) { pauseAnimation(); return; }
+  animationBinding = '';
+  playing = true; animationTime = performance.now(); element('play-animation').textContent = 'Pause animation';
+  animationFrame = requestAnimationFrame(animateFrame);
+};
+element('restart-animation').onclick = () => {
+  pauseAnimation();
+  for (const node of snapshot?.nodes ?? []) if (node.content.primitive === 'slider') parameterUpdates.get(node.content.binding)?.(node.content.value);
+  overrides.clear(); draw();
+};
+document.addEventListener('visibilitychange', () => { if (document.hidden) pauseAnimation(); });
 window.addEventListener('pagehide', () => { stopVoice(); void client.disconnect(); renderer?.dispose(); });

@@ -24,6 +24,7 @@ export class LessonClient {
   private generation = 0;
   /** Backend has a realtime voice provider configured. */
   voiceAvailable = false;
+  authorAvailable = false;
   constructor(private hooks: Hooks) {}
 
   /** Authenticated JSON call; errors carry the status and the backend's detail when it sends one. */
@@ -49,6 +50,7 @@ export class LessonClient {
       const health = await this.api('GET', '/api/health');
       if (health.scene_schema_version !== 1) throw new Error('Backend scene version is unsupported.');
       this.voiceAvailable = health.voice === 'realtime';
+      this.authorAvailable = health.author === 'claude';
       const created = parseSnapshot(await this.api('POST', '/api/lessons'));
       if (generation !== this.generation) return;
       this.state = created;
@@ -106,7 +108,7 @@ export class LessonClient {
           this.hooks.status('Connected', true);
           this.send({ type: 'scene.ack', seq: next.seq });
         } else if (message.type === 'error') {
-          this.hooks.error('Command was invalid or stale. Refreshing scene; your turn was not retried.');
+          this.hooks.error(typeof message.detail === 'string' ? message.detail : 'Command was invalid or stale. Refreshing scene; your turn was not retried.');
           this.recover();
         } else throw new Error('Unknown server packet');
       } catch {

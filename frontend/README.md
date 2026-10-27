@@ -42,12 +42,19 @@ slider locally. **Reset view** restores the camera; a new turn resets local slid
 **Interrupt** advances the server epoch and retains the objects. **Disconnect**
 closes the socket and deletes the lesson to release capacity.
 
+**Visual studio.** Dot product starts with an illustrated parallel-light shadow experiment.
+Switch between **Shadow story** and **Vector model**. **Play animation** sweeps a selected
+parameter smoothly; pause, change speed, drag the slider, or reset to the original example.
+Playback runs locally. Equations use LaTeX via KaTeX below the drawing, and narration stays
+outside the geometry. Generated lessons default to 2D unless depth is useful.
+
 **Tutor.** After connecting, say (with voice on) or type what you want to learn and select
-**Start learning**. The tutor asks a few quick questions, then teaches one concept at a time along
-the cheapest route through your knowledge graph, without showing the route. Every explanation has
-a diagram; move its sliders to explore. Answer the check question at the end of each lesson, or
+**Start learning**. The default teaches your requested topic from the beginning, including
+previously mastered topics. Enable **Use memory to skip familiar prerequisites** for starting
+questions and an adaptive route through your graph. Every explanation has a diagram;
+move its sliders to explore. Answer the check question at the end of each lesson, or
 select **I'm confused** (or just say so) for a deeper explanation. **Continue** repeats a pending
-question. Your graph persists, so returning learners skip what they already know. With
+question. Your graph persists and only graded answers change mastery. With
 `ANTHROPIC_API_KEY` set, Claude writes new explanations, grades free-form answers and adds missing
 concepts; those scenes carry a small "AI-generated" marker.
 

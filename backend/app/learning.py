@@ -158,12 +158,13 @@ def vector_projection(u=(3.0, 0.0), v=(2.0, 3.0)) -> LessonPlan:
         Node(id="u", content=Arrow(end=u)),
         Node(id="v", content=Arrow(end=v), style="secondary"),
         Node(id="projection", content=Arrow(end=shadow)),
-        Node(id="formula", content=Label(text="proj_u(v) = (u dot v / u dot u) u")),
+        Node(id="formula", content=Label(text=r"$\operatorname{proj}_{\mathbf u}\mathbf v = \frac{\mathbf u\cdot\mathbf v}{\mathbf u\cdot\mathbf u}\mathbf u$")),
         Node(id="angle", content=Slider(binding="projection.angle", minimum=-180.0,
                                         maximum=180.0, value=round(degrees(atan2(v[1], v[0])), 6))),
     ], beats=[
-        TeachingBeat(beat_id="vectors", say_text=f"The two arrows represent u = {_vec(u)} "
-                     f"and v = {_vec(v)}.", focus_ids=["u", "v"]),
+        TeachingBeat(beat_id="vectors", say_text="Imagine shining parallel light toward a wall. "
+                     "How long will an arrow's shadow be as you rotate it? "
+                     f"The two arrows represent u = {_vec(u)} and v = {_vec(v)}.", focus_ids=["u", "v"]),
         TeachingBeat(beat_id="projection", say_text=f"Project v onto u: its shadow is {_vec(shadow)}.",
                      focus_ids=["projection"]),
         TeachingBeat(beat_id="dot", say_text=f"Here u dot v is {_num(dot)}, and u dot u is {_num(uu)}.",
@@ -238,11 +239,12 @@ def dijkstra_lesson(nodes=tuple(GRAPH_POSITIONS), edges=tuple(GRAPH_EDGES), sour
                     spots[0])
         placed.append(spot)
         scene.append(Node(id=f"w_{a}_{b}", content=Label(text=str(weight), position=list(spot))))
-    # Not id "formula": the renderer pins that ID onto the caption row.
-    scene.append(Node(id="relax_rule", content=Label(text="dist(v) = min(dist(v), dist(u) + w(u, v))",
+    scene.append(Node(id="relax_rule", content=Label(text=r"$d(v)\leftarrow\min\{d(v),\,d(u)+w(u,v)\}$",
                                                      position=[0.0, 4.4])))
 
-    beats = [TeachingBeat(beat_id="start", say_text=f"Start at {source} with distance 0. Every other "
+    beats = [TeachingBeat(beat_id="start", say_text=f"Imagine these edges are roads and their numbers are travel times. "
+                          f"How can we find the fastest journey from {source} to {target}? "
+                          f"Start at {source} with distance 0. Every other "
                           "node starts at infinity because we have not reached it yet.",
                           focus_ids=[f"node_{source}", f"label_{source}"])]
     for u, d, updates in trace:
@@ -357,7 +359,7 @@ def mean_value_lesson(coefficients=(0.0, 0.0, 0.0, 0.125), a=0.0, b=3.0) -> Less
         Node(id="secant", style="secondary", content=Curve(points=_points([(a, f(a)), (b, f(b))]))),
         Node(id="a_label", content=Label(text=a_text, position=a_at)),
         Node(id="b_label", content=Label(text=b_text, position=b_at)),
-        Node(id="mvt_formula", content=Label(text="f′(c) = (f(b) − f(a)) / (b − a)", position=[-1.0, 4.4])),
+        Node(id="mvt_formula", content=Label(text=r"$f'(c)=\frac{f(b)-f(a)}{b-a}$", position=[-1.0, 4.4])),
     ]
     tangent_ids = []
     for i, (c, tangent, text, at) in enumerate(zip(shown, tangents, c_texts, c_at), start=1):
@@ -378,7 +380,9 @@ def mean_value_lesson(coefficients=(0.0, 0.0, 0.0, 0.125), a=0.0, b=3.0) -> Less
         tangent_text = (f"Two points work, c ≈ {_num(points[0], 2)} and c ≈ {_num(points[1], 2)}. At each, "
                         f"the tangent slope f′(c) is {_num(slope)}, parallel to the secant.")
     return LessonPlan(recipe_id="mean_value_v1", nodes=scene, beats=[
-        TeachingBeat(beat_id="hypotheses", say_text=f"f(x) = {poly} is a polynomial, so it is "
+        TeachingBeat(beat_id="hypotheses", say_text="A trip has an average speed. Must you have traveled "
+                     "at exactly that speed at some instant? The same question applies to this curve. "
+                     f"f(x) = {poly} is a polynomial, so it is "
                      f"continuous on [{_num(a)}, {_num(b)}] and differentiable on ({_num(a)}, {_num(b)}). "
                      "The theorem applies.", focus_ids=["f", "f_label", "a_label", "b_label"]),
         TeachingBeat(beat_id="secant", say_text=f"The secant joins ({_num(a)}, {_num(f(a))}) and "

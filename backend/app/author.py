@@ -36,7 +36,9 @@ DIAGRAM_RULES = """Diagram language (LUCID computes all geometry; you never give
 - arrows: start and end coordinates; points: a coordinate with optional short text.
 - Expressions use + - * / ^, parentheses, numbers, pi, e, the sliders' letters (and t in
   curves), and sin cos tan asin acos atan exp ln sqrt abs floor min max. Always write *.
-- labels: short static text at fixed numeric positions within -5.5..5.5; the title shows at the top.
+- labels: use $...$ LaTeX for mathematical labels and equations. Keep geometry labels under
+  24 characters; put longer equations in a label with id="formula" (shown below the picture).
+  Labels must avoid curves, arrows and other labels. Positions within -5.5..5.5.
 - graph: for discrete structures, 2-7 nodes with short labels, up to 10 edges with optional
   numeric weights, and an optional highlighted node path. LUCID lays it out.
 - At the default slider values everything must sit inside the view. 30 objects at most
@@ -45,6 +47,11 @@ DIAGRAM_RULES = """Diagram language (LUCID computes all geometry; you never give
 Beats are spoken aloud, in order: 2-5 beats, each one or two plain sentences under 35 words,
 no markup or symbols that do not read aloud well. Each beat lists the element ids it is about
 (focus); graph nodes are referenced by id, graph edges as "a-b", and "graph" for all of it.
+Start with a concrete problem the idea solves BEFORE naming or defining it. The first beat
+asks a motivating question about something visible. Then reveal the mathematical model,
+move one parameter to show what changes, and finally explain the general rule.
+For continuous topics include at least one meaningful slider whose parameter actually
+changes the geometry. Default to 2D; only use 3D when depth conveys necessary information.
 Only state facts the diagram shows or that are standard and certain. Keep it simple."""
 
 EXAMPLE = json.dumps(AUTHORED["derivatives"].model_dump(), ensure_ascii=False)
@@ -148,7 +155,7 @@ class ClaudeAuthor:
                 "with a new diagram. If the trouble is really a missing, more basic concept, name it in "
                 "prerequisite; otherwise null." if request else
                 "Teach this concept from scratch for this learner. prerequisite is null.")
-        system = ("You are LUCID, a patient tutor in a 3D space. You write one explanation at a time as spoken "
+        system = ("You are LUCID, a patient visual tutor. You write one explanation at a time as spoken "
                   "beats over an interactive diagram, plus a one-line check question answerable in a few words "
                   "(with its expected answer). Honor the learner's request even if they already know the topic: "
                   "review with a fresh example or extend their understanding. Use the ordered teaching sequence "

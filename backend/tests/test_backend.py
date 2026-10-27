@@ -1076,6 +1076,6 @@ def test_tutor_over_websocket_and_http(tmp_path):
         assert done["plan"]["tutor"]["mode"] == "done"
         missing = client.post(f"/api/lessons/{lesson}/tutor", headers=headers(),
                               json={"action": "goal", "text": "quantum tunnelling", "expected_epoch": 2})
-        assert missing.status_code == 404 and "Try:" in missing.json()["detail"]
+        assert missing.status_code == 404 and "ANTHROPIC_API_KEY" in missing.json()["detail"]
         assert client.delete(f"/api/lessons/{lesson}", headers=headers()).status_code == 204
         assert lesson not in app.state.service.sessions

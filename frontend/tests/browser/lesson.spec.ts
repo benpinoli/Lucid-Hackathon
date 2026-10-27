@@ -38,7 +38,7 @@ test('real backend: auth, lesson, local slider, reconnect, interruption and clea
   await page.getByRole('button', { name: 'Explore concept' }).click();
   await expect(page.locator('#beats')).toContainText('The two arrows');
   await expect(page.locator('#scene-meta')).toContainText('revision 1');
-  await expect(page.locator('canvas')).toBeVisible();
+  await expect(page.locator('#shadow-story svg')).toBeVisible();
   await page.screenshot({ path: 'test-results/desktop.png', fullPage: true });
   await page.waitForLoadState('networkidle');
   let requests = 0; page.on('request', request => { if (request.url().includes('/api/')) requests++; });
@@ -56,7 +56,12 @@ test('real backend: auth, lesson, local slider, reconnect, interruption and clea
   await expect(page.locator('#scene-meta')).toContainText('6 objects');
   await page.getByLabel('Or explore any concept freely').fill('A topic without a recipe');
   await page.getByRole('button', { name: 'Explore concept' }).click();
-  await expect(page.locator('#beats')).toContainText('Try asking');
+  await expect(page.getByRole('alert')).toContainText('ANTHROPIC_API_KEY');
+  await page.getByLabel('Or explore any concept freely').fill('derivatives');
+  await expect(page.locator('#status')).toHaveText('Connected');
+  await page.getByRole('button', { name: 'Explore concept' }).click();
+  await expect(page.locator('#scene-meta')).toContainText('revision 2');
+  // The derivative lesson has its own local parameter controls.
   await expect(slider).toHaveCount(0);
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
   await expect(page.locator('#status')).toHaveText('Disconnected');
@@ -72,6 +77,7 @@ test('500 rendered replacements retain bounded GPU resources', async ({ page }) 
   await page.getByRole('button', { name: 'Explore concept' }).click();
   await expect(page.locator('#scene-meta')).toContainText('revision 1');
   await finishAuthoredSteps(page);
+  await page.getByRole('button', { name: 'Vector model', exact: true }).click();
   await page.waitForTimeout(1200);
   await expect(page.locator('#metrics')).toContainText('textures');
   const baseline = (await page.locator('#metrics').textContent())!.match(/(\d+) geometries · (\d+) textures/)!.slice(1).map(Number);
@@ -114,11 +120,17 @@ test('learner can review and go deeper after mastering a goal', async ({ page })
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.locator('#status')).toHaveText('Connected');
   await page.getByLabel('What do you want to learn?').fill('dot product');
+  await page.getByLabel('Use memory to skip familiar prerequisites').check();
   await page.getByRole('button', { name: 'Start learning' }).click();
   await expect(page.locator('#beats')).toContainText('dot (3, 4)');
   await page.getByLabel('Your answer').fill('11');
   await page.getByRole('button', { name: 'Answer', exact: true }).click();
   await expect(page.locator('#beats')).toContainText("You've got Dot product");
+  // The default mode must teach the requested idea even after it is mastered.
+  await page.getByLabel('Use memory to skip familiar prerequisites').uncheck();
+  await page.getByRole('button', { name: 'Start learning' }).click();
+  await expect(page.locator('#beats')).toContainText('Imagine shining parallel light');
+  await expect(page.locator('#shadow-story')).toBeVisible();
   await page.getByRole('button', { name: 'Review', exact: true }).click();
   await expect(page.locator('#beats')).toContainText("Let's review Dot product");
   await expect(page.getByRole('slider', { name: 'Vector angle' })).toBeVisible();
@@ -127,6 +139,40 @@ test('learner can review and go deeper after mastering a goal', async ({ page })
   await expect(page.locator('#beats')).toContainText('Quick check:');
   await expect(page.getByRole('button', { name: 'Ask a question', exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Disconnect', exact: true }).click();
+});
+
+test('shadow animation is local, pausable, typeset, and switches to the vector model', async ({ page }) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.getByLabel('Private backend token').fill('browser-test-only-not-a-real-secret');
+  await page.getByRole('button', { name: 'Connect', exact: true }).click();
+  await expect(page.locator('#status')).toHaveText('Connected');
+  await page.getByLabel('What do you want to learn?').fill('dot product');
+  await page.getByRole('button', { name: 'Start learning' }).click();
+  await expect(page.locator('#shadow-story .katex')).toBeVisible();
+  const vector = page.locator('#story-vector');
+  const before = await vector.getAttribute('d');
+  let commands = 0;
+  page.on('websocket', socket => socket.on('framesent', () => commands++));
+  let requests = 0; page.on('request', request => { if (request.url().includes('/api/')) requests++; });
+  await page.getByRole('button', { name: 'Play animation', exact: true }).click();
+  await expect.poll(() => vector.getAttribute('d')).not.toBe(before);
+  await page.getByRole('button', { name: 'Pause animation', exact: true }).click();
+  const paused = await vector.getAttribute('d');
+  await page.waitForTimeout(250);
+  expect(await vector.getAttribute('d')).toBe(paused);
+  expect(requests).toBe(0); expect(commands).toBe(0);
+  await page.getByRole('button', { name: 'Reset parameters', exact: true }).click();
+  expect(await vector.getAttribute('d')).toBe(before);
+  await page.getByRole('button', { name: 'Vector model', exact: true }).click();
+  await expect(page.locator('#viewport canvas')).toBeVisible();
+  await expect(page.locator('#shadow-story')).toBeHidden();
+  await page.getByRole('button', { name: 'Shadow story', exact: true }).click();
+  await page.screenshot({ path: 'test-results/shadow-studio.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/shadow-mobile.png', fullPage: true });
+  expect(errors).toEqual([]);
 });
 
 test('Dijkstra and mean value theorem lessons render without local sliders', async ({ page }) => {
@@ -164,6 +210,7 @@ test('tutor: spoken-style check, silent route, interactive diagrams, confusion a
   await page.getByRole('button', { name: 'Connect', exact: true }).click();
   await expect(page.locator('#status')).toHaveText('Connected');
   await page.getByLabel('What do you want to learn?').fill('I want to learn the mean value theorem');
+  await page.getByLabel('Use memory to skip familiar prerequisites').check();
   await page.getByRole('button', { name: 'Start learning' }).click();
   await expect(page.locator('#beats')).toContainText('Is it parallel to the secant');
   const beats = page.locator('#beats');

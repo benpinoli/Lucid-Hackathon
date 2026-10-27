@@ -20,7 +20,7 @@ from memory_graph import AmbiguousConcept, NotFound
 from .author import Check, grade_locally
 from .diagrams import AUTHORED, compile_lesson
 from .goals import KNOWN, GoalError, Topic, _wrap, concept_card
-from .learning import LessonPlan, TeachingBeat
+from .learning import LessonPlan, TeachingBeat, plan as authored_plan
 from .library import LessonLibrary
 from .reviews import Reviews
 from .scene import Label, MAX_OBJECTS, Node
@@ -481,7 +481,8 @@ class Tutor:
                 return planned, check
         topic = self.curriculum.by_id.get(concept)
         if request is None and topic and topic.recipe:
-            return self.planner(topic.recipe), None
+            # Canonical authored examples need no parameter-selection provider round trip.
+            return authored_plan(topic.recipe), None
         if request is None and topic and topic.key in AUTHORED:
             return compile_lesson(AUTHORED[topic.key]), None
         if request is None:
@@ -500,6 +501,9 @@ class Tutor:
         saved = self.library.get(user, concept)
         if saved:
             return saved
+        if self.author and topic is None:
+            raise GoalError("The topic was created, but its diagram lesson couldn't be generated yet. "
+                            "Try the topic again. Check the backend logs if it keeps failing.")
         return concept_card(topic or Topic(concept, self._name(concept), "", 2, self._description(concept)
                                            or "No explanation is available yet.", "", (), 0)), None
 
@@ -544,7 +548,10 @@ class Tutor:
         if concept is None and re.search(r"\b(this|that|it|why|again)\b", text, re.I):
             concept = s.viewed or s.current or s.target
         if concept:
-            plan, check = self._lesson(concept, user, s, request=text)
+            topic = self.curriculum.by_id.get(concept)
+            simple = re.sub(r"^(?:explain|teach me|what is|what are|learn)\s+(?:the\s+)?", "", text.casefold()).rstrip("?.! ")
+            canonical = topic and simple in (topic.name.casefold(), *topic.aliases)
+            plan, check = self._lesson(concept, user, s, request=None if canonical else text)
             plan.concept_id = concept
             if guided:
                 s.target, s.current, s.mode = concept, concept, "checking"
@@ -693,6 +700,13 @@ class Tutor:
         # instead of swallowing them with the broad substring alias "function".
         if concept is None and create and self.author:
             concept = self._create(text, link_to)
+            if concept is None:
+                raise GoalError("The topic writer couldn't create that lesson. Check the backend's "
+                                "Anthropic configuration and try again. Existing lessons still work.")
+        if (concept is None and create and not self.author and self.curriculum.match(text) is None
+                and authored_plan(text).recipe_id == "whiteboard_v1"):
+            raise GoalError("New topics need ANTHROPIC_API_KEY on the backend. Restart the backend "
+                            "after setting it. You can explore the built-in topics now.")
         if concept is None:
             concept = self.curriculum.match(text)
         if concept is None and self.goals.resolver is not None:
@@ -705,7 +719,7 @@ class Tutor:
         names = {node.label: node.id for node in snapshot.nodes.values()}
         words = set(re.findall(r"[a-z]{3,}", request.casefold())) - {"the", "and", "learn", "about", "teach", "want"}
         candidates = sorted(names, key=lambda name: (
-            -len(words & set(re.findall(r"[a-z]{3,}", name.casefold()))), name.casefold()))[:200]
+            -len(words & set(re.findall(r"[a-z]{3,}", name.casefold()))), name.casefold()))[:60]
         spec = self.author.concept(request, candidates)
         if spec is None or not spec.name.strip():
             return None
